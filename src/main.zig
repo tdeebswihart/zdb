@@ -1,10 +1,20 @@
 const std = @import("std");
-const testing = std.testing;
+const storage = @import("storage/storage.zig");
 
-export fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
-
-test "basic add functionality" {
-    try testing.expect(add(3, 7) == 10);
+pub fn main() !void {
+    const stderr = std.io.getStdErr();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = &gpa.allocator;
+    defer {
+        const leaked = gpa.deinit();
+        if (leaked) stderr.writeAll("leaked memory\n") catch @panic("failed to write to stderr");
+    }
+    const dbfile = try std.fs.cwd().createFile("init.zdb", .{ .read = true, .truncate = true, .mode = 0o755 });
+    const mgr = try storage.Manager.init(dbfile, 4096, allocator);
+    defer {
+        mgr.deinit() catch |err| {
+            std.debug.print("failed to deinit manager: {any}\n", .{err});
+        };
+    }
+    _ = try mgr.put(&[_]u8{0x41, 0x42, 0x43});
 }

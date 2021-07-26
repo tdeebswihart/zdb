@@ -5,13 +5,15 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const lib = b.addStaticLibrary("zdb", "src/main.zig");
-    lib.setBuildMode(mode);
-    lib.install();
+    const exe = b.addExecutable("zdb", "src/main.zig");
+    exe.setBuildMode(mode);
+    exe.install();
 
-    var main_tests = b.addTest("src/main.zig");
-    main_tests.setBuildMode(mode);
+    exe.setOutputDir("zig-cache");
 
-    const test_step = b.step("test", "Run library tests");
-    test_step.dependOn(&main_tests.step);
+    //var main_tests = b.addTest("src/main.zig");
+    //main_tests.setBuildMode(mode);
+
+    //const test_step = b.step("test", "Run library tests");
+    //test_step.dependOn(&main_tests.step);
 }
