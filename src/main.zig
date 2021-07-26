@@ -10,7 +10,8 @@ pub fn main() !void {
         if (leaked) stderr.writeAll("leaked memory\n") catch @panic("failed to write to stderr");
     }
     const dbfile = try std.fs.cwd().createFile("init.zdb", .{ .read = true, .truncate = true, .mode = 0o755 });
-    const mgr = try storage.Manager.init(dbfile, 4096, allocator);
+    defer dbfile.close();
+    const mgr = try storage.Manager(storage.FSFile).init(.{.context = dbfile}, 4096, allocator);
     defer {
         mgr.deinit() catch |err| {
             std.debug.print("failed to deinit manager: {any}\n", .{err});
