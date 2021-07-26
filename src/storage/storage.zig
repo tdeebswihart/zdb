@@ -18,7 +18,7 @@ const BlockHeader = struct {
     free_space: u16 = 0,
     active_records: u32 = 0,
 
-    pub fn valid(self: BlockHeader) bool {
+    pub fn invalid(self: BlockHeader) bool {
         return (self.active_records == 0) and (self.free_space == 0);
     }
 };
@@ -41,7 +41,7 @@ const Block = struct {
         var hdr = BlockHeader{};
         _ = try file.read(std.mem.asBytes(&hdr));
         const records = blk: {
-            if (!hdr.valid()) {
+            if (hdr.invalid()) {
                 hdr.free_space = size;
                 hdr.remaining_space = size - @sizeOf(BlockHeader);
                 break :blk std.ArrayList(Record).init(mem);
