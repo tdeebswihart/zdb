@@ -1,5 +1,5 @@
 const std = @import("std");
-const storage = @import("storage/storage.zig");
+const storage = @import("storage.zig");
 
 fn openFile(fpath: []const u8) !std.fs.File {
     const cwd = std.fs.cwd();
@@ -19,7 +19,7 @@ pub fn main() !void {
     }
     const dbfile = try openFile("init.zdb");
     defer dbfile.close();
-    const mgr = try storage.Manager(storage.FSFile).init(.{.context = dbfile}, 4096, allocator);
+    const mgr = try storage.FileManager.init(.{.context = dbfile}, 4096, allocator);
     defer {
         mgr.deinit() catch |err| {
             std.debug.print("failed to deinit manager: {any}\n", .{err});
