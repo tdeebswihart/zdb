@@ -4,4 +4,4 @@
 tmp/
 
 
-zig-cache/**
+**zig-cache/**

@@ -4,7 +4,7 @@ const Entry = @import("entry.zig").Entry;
 
 // Storage managers manage access to individual files.
 // Each file is carved up into blocks which we treat as a generic heap.
-// TODO track occupancy using an occupancy map, not a pointer to the next block with space.
+// TODO track occupancy using an occupancy map rather than a list of blocks.
 // This manager will never reclaim space.
 //
 // FILE HEADER
