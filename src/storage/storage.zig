@@ -58,16 +58,17 @@ pub fn getFileSize(f: fs.File) fs.File.StatError!u64 {
     return st.size;
 }
 
-pub const FSFile = File(fs.File,
-                        fs.File.read, fs.File.ReadError,
-                        fs.File.write, fs.File.WriteError,
-                        fs.File.seekTo, fs.File.SeekError,
-                        fs.File.setEndPos, fs.File.SetEndPosError,
-                        getFileSize, fs.File.StatError,
+pub const FSFile = File(
+    fs.File,
+    fs.File.read, fs.File.ReadError,
+    fs.File.write, fs.File.WriteError,
+    fs.File.seekTo, fs.File.SeekError,
+    fs.File.setEndPos, fs.File.SetEndPosError,
+    getFileSize, fs.File.StatError,
 );
 
 const Record = struct {
-    // The offset of this Record in its block
+    // The offset of this Record within its block
     offset: u16,
     // Entries can be at most 1 block in size
     // A size of -1 means "deleted"
@@ -114,10 +115,13 @@ fn Block(comptime T: type) type {
                     hdr.remaining_space = size - @sizeOf(BlockHeader);
                     break :blk std.ArrayList(Record).init(mem);
                 }
-                const recs = try std.ArrayList(Record).initCapacity(mem, hdr.active_records);
+                var recs = std.ArrayList(Record).init(mem);
+                try recs.resize(hdr.active_records);
                 _ = try file.readAll(std.mem.sliceAsBytes(recs.items));
                 break :blk recs;
             };
+
+            std.debug.assert(hdr.active_records == records.items.len);
 
             var b = try mem.create(Self);
             b.file = file;
@@ -154,15 +158,34 @@ fn Block(comptime T: type) type {
             try self.file.writeAll(record);
 
             const record_num = self.records.items.len;
+
             try self.records.append(Record{
                 .offset = self.header.free_space,
                 .size = @intCast(u16, record.len),
             });
+
+            self.header.active_records += 1;
+            std.debug.assert(self.header.active_records == self.records.items.len);
+
             self.header.remaining_space -= sz;
 
             return Entry{
                 .record = @intCast(u16, record_num),
             };
+        }
+
+        pub fn get(self: *Self, record: u16) ![]const u8 {
+            if (record > self.header.active_records) {
+                return GetError.RecordDoesntExist;
+            }
+            const rec = self.records.items[record];
+            if (rec.size == -1) {
+                return GetError.RecordDeleted;
+            }
+            try self.file.seekTo(self.offset + rec.offset);
+            const buf = try self.mem.alloc(u8, rec.size);
+            _ = try self.file.readAll(buf);
+            return buf;
         }
     };
 }
@@ -180,6 +203,12 @@ fn Block(comptime T: type) type {
 pub const FileHeader = struct {
     block_size: u16 = 0,
     allocated_blocks: u64 = 0,
+};
+
+pub const GetError = error {
+    BlockDoesntExist,
+    RecordDoesntExist,
+    RecordDeleted,
 };
 
 pub fn Manager(comptime T: type) type {
@@ -214,9 +243,12 @@ pub fn Manager(comptime T: type) type {
                 try blocks.resize(hdr.allocated_blocks);
 
                 var offset: u64 = @sizeOf(FileHeader);
-                while (offset < file_size) : (offset += block_size) {
+                var i: usize = 0;
+                const sz = @sizeOf(FileHeader) + block_size * hdr.allocated_blocks;
+                while (offset < sz) : (offset += block_size) {
                     const block = try BlockT.init(file, offset, block_size, mem);
-                    blocks.appendAssumeCapacity(block);
+                    blocks.items[i] = block;
+                    i += 1;
                 }
             }
             const mgr = try mem.create(Self);
@@ -230,6 +262,7 @@ pub fn Manager(comptime T: type) type {
         }
 
         pub fn deinit(self: *Self) !void {
+            std.debug.assert(self.header.allocated_blocks == self.blocks.items.len);
             try self.file.seekTo(0);
             try self.file.writeAll(std.mem.asBytes(&self.header));
             for (self.blocks.items) |block| {
@@ -243,7 +276,8 @@ pub fn Manager(comptime T: type) type {
             var i: u64 = 0;
             var end = self.blocks.items.len;
             while (i < end) : (i += 1) {
-                if (self.blocks.items[i].can_contain(@intCast(u16, record.len))) {
+                const block = self.blocks.items[i];
+                if (block.can_contain(@intCast(u16, record.len))) {
                     break;
                 }
             }
@@ -254,6 +288,7 @@ pub fn Manager(comptime T: type) type {
                     self.file_size += self.header.block_size;
                     try self.file.extend(self.file_size);
                     try self.blocks.append(b);
+                    self.header.allocated_blocks += 1;
                     break :blk b;
                 }
                 break :blk self.blocks.items[i];
@@ -264,8 +299,12 @@ pub fn Manager(comptime T: type) type {
             return entry;
         }
 
-        pub fn get(self: *Self, entry: Entry) !?[]const u8 {
-            @panic("FIXME: implement get");
+        pub fn get(self: *Self, entry: Entry) ![]const u8 {
+            if (entry.block > self.blocks.items.len) {
+                return GetError.BlockDoesntExist;
+            }
+            const block = self.blocks.items[entry.block];
+            return block.get(entry.record);
         }
 
         pub fn delete(self: *Self, entry: Entry) !void {
