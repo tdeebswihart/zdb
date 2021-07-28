@@ -32,7 +32,7 @@ pub fn main() !void {
     if (!std.mem.eql(u8, read, b1)) {
         std.debug.print("read {any} but expected {any}\n", .{read, b1});
     } else {
-        std.debug.print("read {any} at ({d},{d})\n", .{read, entry.block, entry.record});
+        std.debug.print("read {any} at ({d},{d})\n", .{read, entry.block, entry.slot});
     }
 
 }

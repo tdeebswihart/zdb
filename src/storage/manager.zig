@@ -18,24 +18,24 @@ pub const FileHeader = struct {
 };
 
 pub const GetError = error {
-    BlockDoesntExist,
+    PageDoesntExist,
 };
 
 pub fn Manager(comptime T: type) type {
     return struct {
-        const BlockT = block.Block(T);
+        const PageT = block.Page(T);
 
         header: FileHeader,
         file: T,
         file_size: u64,
         mem: *std.mem.Allocator,
-        blocks: std.ArrayList(*BlockT),
+        blocks: std.ArrayList(*PageT),
 
         const Self = @This();
 
         pub fn init(file: T, block_size: u16, mem: *std.mem.Allocator) !*Self {
             var hdr = FileHeader{.block_size = block_size};
-            var blocks = std.ArrayList(*BlockT).init(mem);
+            var blocks = std.ArrayList(*PageT).init(mem);
             var file_size: u64 = 0;
 
             const size = try file.size();
@@ -56,7 +56,7 @@ pub fn Manager(comptime T: type) type {
                 var i: usize = 0;
                 const sz = @sizeOf(FileHeader) + block_size * hdr.allocated_blocks;
                 while (offset < sz) : (offset += block_size) {
-                    const b= try BlockT.init(file, offset, block_size, mem);
+                    const b= try PageT.init(file, offset, block_size, mem);
                     blocks.items[i] = b;
                     i += 1;
                 }
@@ -94,7 +94,7 @@ pub fn Manager(comptime T: type) type {
             const bl = blk: {
                 if (i == end) {
                     // No blocks found, alloc a new one
-                    const b = try BlockT.init(self.file, self.file_size, self.header.block_size, self.mem);
+                    const b = try PageT.init(self.file, self.file_size, self.header.block_size, self.mem);
                     self.file_size += self.header.block_size;
                     try self.file.extend(self.file_size);
                     try self.blocks.append(b);
@@ -111,10 +111,22 @@ pub fn Manager(comptime T: type) type {
 
         pub fn get(self: *Self, entry: Entry) ![]const u8 {
             if (entry.block > self.blocks.items.len) {
-                return GetError.BlockDoesntExist;
+                return GetError.PageDoesntExist;
             }
             const b = self.blocks.items[entry.block];
-            return b.get(entry.record);
+            return b.get(entry.slot);
+        }
+
+        pub fn update(self: *Self, oldEntry: Entry, record: []const u8) !void {
+            const data = try b.get(entry);
+            if (data.len != record.len) {
+                return UpdateEError.InvalidLength;
+            }
+            const bl = self.blocks.items[oldEntry.block];
+            try bl.delete(oldEntry.slot);
+            var entry = try bl.put(record);
+            entry.block = entry.block;
+            return entry;
         }
 
         pub fn delete(self: *Self, entry: Entry) !void {

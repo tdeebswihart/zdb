@@ -1,7 +1,7 @@
 const std = @import("std");
 const Entry = @import("entry.zig").Entry;
 
-pub const Record = struct {
+pub const Slot = struct {
     // The offset of this Record within its block
     offset: u16,
     // Entries can be at most 1 block in size
@@ -9,17 +9,17 @@ pub const Record = struct {
     size: u16,
 };
 
-pub const BlockError = error {
+pub const PageError = error {
     OutOfSpace,
 };
 
 pub const Header = struct {
     remaining_space: u16 = 0,
     free_space: u16 = 0,
-    active_records: u32 = 0,
+    slots_inuse: u32 = 0,
 
     pub fn invalid(self: Header) bool {
-        return (self.active_records == 0) and (self.free_space == 0);
+        return (self.slots_inuse == 0) and (self.free_space == 0);
     }
 };
 
@@ -32,13 +32,13 @@ pub const GetError = error {
 // allocator for contained records.
 // A periodic compaction (or vacuum) process should clean up
 // deleted blocks so there are no gaps in the file.
-pub fn Block(comptime T: type) type {
+pub fn Page(comptime T: type) type {
     return struct {
         file: T,
         offset: u64,
         size: u16,
         header: Header,
-        records: std.ArrayList(Record),
+        slots: std.ArrayList(Slot),
         mem: *std.mem.Allocator,
 
         const Self = @This();
@@ -52,22 +52,22 @@ pub fn Block(comptime T: type) type {
                 if (hdr.invalid()) {
                     hdr.free_space = size;
                     hdr.remaining_space = size - @sizeOf(Header);
-                    break :blk std.ArrayList(Record).init(mem);
+                    break :blk std.ArrayList(Slot).init(mem);
                 }
-                var recs = std.ArrayList(Record).init(mem);
-                try recs.resize(hdr.active_records);
+                var recs = std.ArrayList(Slot).init(mem);
+                try recs.resize(hdr.slots_inuse);
                 _ = try file.readAll(std.mem.sliceAsBytes(recs.items));
                 break :blk recs;
             };
 
-            std.debug.assert(hdr.active_records == records.items.len);
+            std.debug.assert(hdr.slots_inuse == records.items.len);
 
             var b = try mem.create(Self);
             b.file = file;
             b.offset = offset;
             b.size = size;
             b.header = hdr;
-            b.records = records;
+            b.slots = records;
             b.mem = mem;
             return b;
         }
@@ -75,19 +75,19 @@ pub fn Block(comptime T: type) type {
         pub fn deinit(self: *Self) !void {
             try self.file.seekTo(self.offset);
             _ = try self.file.writeAll(std.mem.asBytes(&self.header));
-            _ = try self.file.writeAll(std.mem.sliceAsBytes(self.records.items));
-            self.records.deinit();
+            _ = try self.file.writeAll(std.mem.sliceAsBytes(self.slots.items));
+            self.slots.deinit();
             self.mem.destroy(self);
         }
 
         pub fn can_contain(self: *Self, amount: u16) bool {
-            return self.header.remaining_space > (amount + @sizeOf(Record));
+            return self.header.remaining_space > (amount + @sizeOf(Slot));
         }
 
         pub fn put(self: *Self, record: []const u8) !Entry {
-            const sz = @intCast(u16, record.len) + @sizeOf(Record);
+            const sz = @intCast(u16, record.len) + @sizeOf(Slot);
             if (self.header.remaining_space < sz) {
-                return BlockError.OutOfSpace;
+                return PageError.OutOfSpace;
             }
 
             self.header.free_space -= @intCast(u16, record.len);
@@ -96,28 +96,39 @@ pub fn Block(comptime T: type) type {
             try self.file.seekTo(offset);
             try self.file.writeAll(record);
 
-            const record_num = self.records.items.len;
+            const record_num = self.slots.items.len;
 
-            try self.records.append(Record{
+            try self.slots.append(Slot{
                 .offset = self.header.free_space,
                 .size = @intCast(u16, record.len),
             });
 
-            self.header.active_records += 1;
-            std.debug.assert(self.header.active_records == self.records.items.len);
+            self.header.slots_inuse += 1;
+            std.debug.assert(self.header.slots_inuse == self.slots.items.len);
 
             self.header.remaining_space -= sz;
 
             return Entry{
-                .record = @intCast(u16, record_num),
+                .slot = @intCast(u16, record_num),
             };
         }
 
-        pub fn get(self: *Self, record: u16) ![]const u8 {
-            if (record > self.header.active_records) {
+        pub fn delete(self: *Self, slot: u16) !void {
+            if (slot > self.header.slots_inuse) {
                 return GetError.RecordDoesntExist;
             }
-            const rec = self.records.items[record];
+            rec = self.slots.items[record];
+            if (rec.size == -1) {
+                return GetError.RecordDeleted;
+            }
+            rec.size = -1;
+        }
+
+        pub fn get(self: *Self, slot: u16) ![]const u8 {
+            if (slot > self.header.slots_inuse) {
+                return GetError.RecordDoesntExist;
+            }
+            const rec = self.slots.items[slot];
             if (rec.size == -1) {
                 return GetError.RecordDeleted;
             }
