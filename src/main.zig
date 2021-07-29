@@ -19,7 +19,8 @@ pub fn main() !void {
     }
     const dbfile = try openFile("init.zdb");
     defer dbfile.close();
-    const mgr = try storage.FileManager.init(.{.context = dbfile}, 4096, allocator);
+    var fs = storage.File.init(dbfile);
+    const mgr = try storage.Manager.init(&fs.store, 4096, allocator);
     defer {
         mgr.deinit() catch |err| {
             std.debug.print("failed to deinit manager: {any}\n", .{err});

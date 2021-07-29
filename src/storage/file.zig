@@ -1,68 +1,150 @@
 const std = @import("std");
 const fs = std.fs;
 
-pub fn File(comptime Context: type,
-            comptime readFn: anytype,comptime ReadError: anytype,
-            comptime writeFn: anytype, comptime WriteError: anytype,
-            comptime seekFn: anytype,comptime SeekError: anytype,
-            comptime extendFn: anytype, comptime ExtendError: anytype,
-            comptime sizeFn: anytype,comptime SizeError: anytype,
-) type {
-    return struct {
-        context: Context,
+pub const ReadError = error {
+    AccessDenied,
+    Interrupted,
+    NotOpenForReading,
+    Unexpected,
+};
 
-        const Self = @This();
-        pub fn read(self: Self, buffer: []u8) ReadError!usize {
-            return readFn(self.context, buffer);
+pub const WriteError = error {
+    NoSpaceLeft,
+    AccessDenied,
+    Unexpected,
+    NotOpenForWriting,
+};
+
+pub const SeekError = error {
+    Unseekable,
+    Unexpected,
+};
+
+pub const ExtendError = error {
+    TooBig,
+    Busy,
+    Unexpected,
+    AccessDenied,
+};
+
+pub const SizeError = error {
+    AccessDenied,
+    Unexpected,
+};
+
+pub const Store = struct {
+    readFn: fn(*Store, []u8) ReadError!usize,
+    writeFn: fn(*Store, []const u8) WriteError!usize,
+    seekFn: fn(*Store, usize) SeekError!void,
+    extendFn: fn(*Store, usize) ExtendError!void,
+    sizeFn: fn(*Store) SizeError!usize,
+
+    const Self = @This();
+    pub fn read(self: *Self, buffer: []u8) ReadError!usize {
+        return self.readFn(self, buffer);
+    }
+
+    pub fn readAll(self: *Self, buffer: []u8) ReadError!usize {
+        var index: usize = 0;
+        while (index != buffer.len) {
+            const amt = try self.readFn(self, buffer[index..]);
+            if (amt == 0) return index;
+            index += amt;
         }
+        return index;
+    }
 
-        pub fn readAll(self: Self, buffer: []u8) ReadError!usize {
-            var index: usize = 0;
-            while (index != buffer.len) {
-                const amt = try self.read(buffer[index..]);
-                if (amt == 0) return index;
-                index += amt;
-            }
-            return index;
+    pub fn write(self: *Self, buffer: []const u8) WriteError!usize {
+        return self.writeFn(self, buffer);
+    }
+
+    pub fn writeAll(self: *Self, buffer: []const u8) WriteError!void {
+        var index: usize = 0;
+        while (index != buffer.len) {
+            const amt = try self.writeFn(self, buffer[index..]);
+            if (amt == 0) break;
+            index += amt;
         }
+    }
 
-        pub fn write(self: Self, buffer: []const u8) WriteError!usize {
-            return writeFn(self.context, buffer);
-        }
+    pub fn seekTo(self: *Self, pos: usize) SeekError!void {
+        return self.seekFn(self, pos);
+    }
 
-        pub fn writeAll(self: Self, buffer: []const u8) WriteError!void {
-            var index: usize = 0;
-            while (index != buffer.len) {
-                const amt = try self.write(buffer[index..]);
-                if (amt == 0) break;
-                index += amt;
-            }
-        }
+    pub fn extend(self: *Self, sz: usize) ExtendError!void {
+        return self.extendFn(self, sz);
+    }
 
-        pub fn seekTo(self: Self, pos: usize) SeekError!void {
-            return seekFn(self.context, pos);
-        }
+    pub fn size(self: *Self) SizeError!usize {
+        return self.sizeFn(self);
+    }
+};
 
-        pub fn extend(self: Self, sz: usize) ExtendError!void {
-            return extendFn(self.context, sz);
-        }
+pub const File = struct {
+    f: fs.File,
+    store: Store,
 
-        pub fn size(self: Self) SizeError!u64 {
-            return sizeFn(self.context);
-        }
-    };
-}
+    pub fn init(f: fs.File) @This() {
+        return .{
+            .f = f,
+            .store = .{
+                .readFn = readImpl,
+                .writeFn = writeImpl,
+                .seekFn = seekImpl,
+                .extendFn = extendImpl,
+                .sizeFn = sizeImpl,
+            },
+        };
+    }
 
-pub fn getFileSize(f: fs.File) fs.File.StatError!u64 {
-    const st = try f.stat();
-    return st.size;
-}
+    const FReadError = fs.File.ReadError;
+    fn readImpl(store: *Store, buffer: []u8) ReadError!usize {
+        const self: fs.File = @fieldParentPtr(@This(), "store", store).f;
+        return self.read(buffer) catch |err| return switch (err) {
+            FReadError.AccessDenied => ReadError.AccessDenied,
+            FReadError.NotOpenForReading => ReadError.NotOpenForReading,
+            else => ReadError.Unexpected,
+        };
+    }
 
-pub const FSFile = File(
-    fs.File,
-    fs.File.read, fs.File.ReadError,
-    fs.File.write, fs.File.WriteError,
-    fs.File.seekTo, fs.File.SeekError,
-    fs.File.setEndPos, fs.File.SetEndPosError,
-    getFileSize, fs.File.StatError,
-);
+    const FWriteError = fs.File.WriteError;
+    fn writeImpl(store: *Store, buffer: []const u8) WriteError!usize {
+        const self: fs.File = @fieldParentPtr(@This(), "store", store).f;
+        return self.write(buffer) catch |err| return switch (err) {
+            FWriteError.AccessDenied => WriteError.AccessDenied,
+            FWriteError.NotOpenForWriting => WriteError.NotOpenForWriting,
+            FWriteError.NoSpaceLeft => WriteError.NoSpaceLeft,
+            else => WriteError.Unexpected,
+        };
+    }
+
+    const FSeekError = fs.File.SeekError;
+    fn seekImpl(store: *Store, pos: usize) SeekError!void {
+        const self: fs.File = @fieldParentPtr(@This(), "store", store).f;
+        return self.seekTo(pos) catch |err| return switch(err) {
+            FSeekError.Unseekable => SeekError.Unseekable,
+            else => SeekError.Unexpected,
+        };
+    }
+
+    const FExtendError = fs.File.SetEndPosError;
+    fn extendImpl(store: *Store, sz: usize) ExtendError!void {
+        const self: fs.File = @fieldParentPtr(@This(), "store", store).f;
+        return self.setEndPos(sz) catch |err| return switch(err) {
+            FExtendError.AccessDenied => ExtendError.AccessDenied,
+            FExtendError.FileTooBig => ExtendError.TooBig,
+            FExtendError.FileBusy => ExtendError.Busy,
+            else => ExtendError.Unexpected,
+        };
+    }
+
+    const FSizeError = fs.File.StatError;
+    fn sizeImpl(store: *Store) SizeError!usize {
+        const self: fs.File = @fieldParentPtr(@This(), "store", store).f;
+        const st = self.stat() catch |err| return switch (err) {
+            FSizeError.AccessDenied => SizeError.AccessDenied,
+            else => SizeError.Unexpected,
+        };
+        return st.size;
+    }
+};
