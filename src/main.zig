@@ -20,16 +20,19 @@ pub fn main() !void {
     const dbfile = try openFile("init.zdb");
     defer dbfile.close();
     var fs = storage.File.init(dbfile);
-    const mgr = try storage.Manager.init(&fs.store, 4096, allocator);
+    const mgr = try storage.Manager.init(&fs.store, 4096, 4096*5, allocator);
     defer {
         mgr.deinit() catch |err| {
             std.debug.print("failed to deinit manager: {any}\n", .{err});
         };
     }
     const b1: []const u8 = &[_]u8{0x41, 0x42, 0x43};
-    const entry = try mgr.put(b1);
+    const entry = storage.Entry{
+        .block=0,
+        .slot=2,
+    };
+    //const entry = try mgr.put(b1);
     const read = try mgr.get(entry);
-    defer allocator.free(read);
     if (!std.mem.eql(u8, read, b1)) {
         std.debug.print("read {any} but expected {any}\n", .{read, b1});
     } else {
