@@ -4,7 +4,7 @@ const storage = @import("storage.zig");
 fn openFile(fpath: []const u8) !std.fs.File {
     const cwd = std.fs.cwd();
     return cwd.openFile(fpath, .{ .read = true, .write = true }) catch |err| switch (err) {
-        error.FileNotFound => try cwd.createFile(fpath, .{.read = true, .mode = 0o755}),
+        error.FileNotFound => try cwd.createFile(fpath, .{ .read = true, .mode = 0o755 }),
         else => err,
     };
 }
@@ -20,23 +20,29 @@ pub fn main() !void {
     const dbfile = try openFile("init.zdb");
     defer dbfile.close();
     var fs = storage.File.init(dbfile);
-    const mgr = try storage.Manager.init(&fs.store, 4096, 4096*5, allocator);
+    const mgr = try storage.Manager.init(&fs.store, 4096, 4096 * 5, allocator);
     defer {
         mgr.deinit() catch |err| {
             std.debug.print("failed to deinit manager: {any}\n", .{err});
         };
     }
-    const b1: []const u8 = &[_]u8{0x41, 0x42, 0x43};
-    const entry = storage.Entry{
-        .block=0,
-        .slot=2,
-    };
-    //const entry = try mgr.put(b1);
-    const read = try mgr.get(entry);
-    if (!std.mem.eql(u8, read, b1)) {
-        std.debug.print("read {any} but expected {any}\n", .{read, b1});
-    } else {
-        std.debug.print("read {any} at ({d},{d})\n", .{read, entry.block, entry.slot});
-    }
 
+    var pin = try mgr.pin(0);
+    defer pin.deinit();
+    var sharedPage = pin.shared();
+
+    const b1: []const u8 = &[_]u8{ 0x41, 0x42, 0x43 };
+    const bytes = sharedPage.get(0) catch |_| {
+        sharedPage.deinit();
+        var xPage = pin.exclusive();
+        const e2 = try xPage.put(b1);
+        std.debug.print("wrote {any} to ({d},{d})\n", .{ e2, e2.page, e2.slot });
+        return;
+    };
+    if (!std.mem.eql(u8, bytes, b1)) {
+        std.debug.print("read {any} but expected {any}\n", .{ bytes, b1 });
+    } else {
+        std.debug.print("read {any}\n", .{bytes});
+    }
+    sharedPage.deinit();
 }
