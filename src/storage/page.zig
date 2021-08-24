@@ -212,7 +212,8 @@ pub const ExclusivePage = struct {
 
         const offset = page.header.freeSpace;
         std.mem.copy(u8, page.buffer[offset - record.len .. offset], record);
-        page.header.freeSpace -= bytesNecessary;
+        page.header.freeSpace -= @intCast(u16, record.len);
+        page.header.remainingSpace -= bytesNecessary;
 
         const recordNum = page.header.slotsInUse;
         const slot = Slot{
