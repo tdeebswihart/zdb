@@ -28,7 +28,7 @@ pub fn main() !void {
     }
 
     var pin = try mgr.pin(0);
-    defer pin.deinit();
+    defer pin.unpin();
     var sharedPage = pin.shared();
 
     const b1: []const u8 = &[_]u8{ 0x41, 0x42, 0x43 };

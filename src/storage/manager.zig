@@ -5,7 +5,7 @@ const PinnedPage = @import("page.zig").Pin;
 const SharedPage = @import("page.zig").SharedPage;
 const ExclusivePage = @import("page.zig").ExclusivePage;
 const Entry = @import("entry.zig").Entry;
-const Latch = @import("../sync.zig").Latch;
+const Latch = @import("libdb").sync.Latch;
 
 const storageVersion = 1;
 
@@ -148,3 +148,46 @@ pub const Manager = struct {
         return lru.pin();
     }
 };
+
+fn setup() !std.fs.File {
+    const tmp = try std.fs.openDirAbsolute("/tmp", .{});
+    return try tmp.createFile("test.zdb", .{
+        .read = true,
+        .truncate = true,
+        .lock = .Exclusive,
+    });
+}
+
+const t = std.testing;
+const File = @import("file.zig").File;
+test "pages can be written to" {
+    const dbfile = try setup();
+    defer dbfile.close();
+    var fs = File.init(dbfile);
+    const mgr = try Manager.init(&fs.store, 512, 1024, t.allocator);
+
+    const expected: []const u8 = &[_]u8{ 0x41, 0x42, 0x43 };
+    var page = try mgr.pin(0);
+
+    var xPage = page.exclusive();
+    const loc = try xPage.put(expected);
+    xPage.deinit();
+    var shared = page.shared();
+    const found = try shared.get(loc.slot);
+    try t.expectEqualSlices(u8, found, expected);
+    shared.deinit();
+    page.unpin();
+    try mgr.deinit();
+}
+
+test "pinned pages are not evicted" {
+    const dbfile = try setup();
+    defer dbfile.close();
+    var fs = File.init(dbfile);
+    const mgr = try Manager.init(&fs.store, 128, 128, t.allocator);
+
+    var page = try mgr.pin(0);
+    try t.expectError(Error.Full, mgr.pin(1));
+    page.unpin();
+    try mgr.deinit();
+}

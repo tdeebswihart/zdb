@@ -2,8 +2,8 @@ const std = @import("std");
 const Entry = @import("entry.zig").Entry;
 const Store = @import("file.zig").Store;
 const Crc32 = std.hash.Crc32;
-const Latch = @import("../sync.zig").Latch;
-const LatchHold = @import("../sync.zig").LatchHold;
+const Latch = @import("libdb").sync.Latch;
+const LatchHold = @import("libdb").sync.LatchHold;
 
 pub const Slot = struct {
     // The offset of this Record within its block
@@ -64,7 +64,7 @@ pub const Page = struct {
     pins: u64 = 0,
     dirty: bool = false,
     header: *align(1) Header,
-    buffer: []u8 = .{},
+    buffer: []u8 = &[_]u8{},
     latch: *Latch,
     mem: *std.mem.Allocator,
 
@@ -146,7 +146,7 @@ pub const Page = struct {
 pub const Pin = struct {
     page: *Page,
 
-    pub fn deinit(self: *@This()) void {
+    pub fn unpin(self: *@This()) void {
         _ = @atomicRmw(u64, &self.page.pins, .Sub, 1, .Release);
         self.page = undefined;
     }
