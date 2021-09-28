@@ -20,6 +20,19 @@ pub const PageError = error{
 
 const Magic: u32 = 0xD3ADB33F;
 
+/// A single page of the directory.
+/// The page directory is composed of a linked list of DirectoryPage structures
+pub const DirectoryPage = struct {
+    pages: u16,
+    next: ?u32,
+    occupancy: []u8,
+
+    pub fn init(self: *align(1) @This(), pageSz: u16) void {
+        self.next = null;
+        self.pages = (pageSz - @sizeOf(u32)) / @sizeOf(u8);
+    }
+};
+
 pub const Header = struct {
     magic: u32 = 0,
     remainingSpace: u16 = 0,

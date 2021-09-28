@@ -19,7 +19,7 @@ pub fn main() !void {
     }
     const dbfile = try openFile("init.zdb");
     defer dbfile.close();
-    var fs = storage.File.init(dbfile);
+    var fs = try storage.File.init(dbfile);
     const mgr = try storage.Manager.init(&fs.store, 4096, 4096 * 5, allocator);
     defer {
         mgr.deinit() catch |err| {

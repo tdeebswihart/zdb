@@ -34,10 +34,8 @@ pub const Error = error{
     Full,
 };
 
-// TODO: split file management from buffer management? Right now they're combined...
 // The storage manager only works with one file
 pub const Manager = struct {
-    // FIXME: read the page directory/occupancy map
     header: Header,
     file: *Store,
     file_size: u64,
@@ -79,9 +77,10 @@ pub const Manager = struct {
         // TODO: how do I keep the directory in memory? must I pin/unpin it? this is messy...
         // Could have the page directory be a linked list of pages that we treat as normal but
         // that gets messy here...
-        // I'd prefer to identity map the page directory and be done with it as that simplifies
-        // my life
-        // var pageDir = std.mem.bytesAsSlice(PageMetadata, bytes: anytype)
+        // I'd prefer to forcibly map the root of the page directory and be done
+        // with it as that simplifies things.
+        // Once I have a working b-tree implementation that shouldn't be hard
+        // (I say that now)...
         const mgr = try mem.create(Self);
         mgr.header = hdr;
         mgr.file = file;
@@ -117,7 +116,7 @@ pub const Manager = struct {
 
         // TODO: can I better handle concurrent `pin` operations for unloaded pages?
         // I want to avoid the situation where a page is loaded into two slots
-        // The ugly solution is to xlock the manager while we perform pin and unpin
+        // The currenty solution is to xlock the manager while we perform pin and unpin
         // operations, and use that to serialize the loading and unloading of
         // pages that have spilled to disk
         var hold = self.latch.exclusive();
@@ -163,7 +162,7 @@ const File = @import("file.zig").File;
 test "pages can be written to" {
     const dbfile = try setup();
     defer dbfile.close();
-    var fs = File.init(dbfile);
+    var fs = try File.init(dbfile);
     const mgr = try Manager.init(&fs.store, 512, 1024, t.allocator);
 
     const expected: []const u8 = &[_]u8{ 0x41, 0x42, 0x43 };
@@ -183,7 +182,7 @@ test "pages can be written to" {
 test "pinned pages are not evicted" {
     const dbfile = try setup();
     defer dbfile.close();
-    var fs = File.init(dbfile);
+    var fs = try File.init(dbfile);
     const mgr = try Manager.init(&fs.store, 128, 128, t.allocator);
 
     var page = try mgr.pin(0);
