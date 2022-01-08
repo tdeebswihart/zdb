@@ -1,123 +1,123 @@
 const std = @import("std");
-const File = @import("file.zig").File;
+const FileManager = @import("file.zig").Manager;
+const Page = @import("page.zig").Page;
+const PinnedPage = @import("page.zig").Pin;
+const SharedPage = @import("page.zig").SharedPage;
+const ExclusivePage = @import("page.zig").ExclusivePage;
+const Latch = @import("libdb").sync.Latch;
+const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
 
-const ByteList = std.ArrayList(u8);
-
-const Error = error{
-    SeekTooLarge,
+const PageMetadata = struct {
+    // page offset = sizeof header + sizeof directory + offset into directory *
+    // pagesize?
+    bytesFree: u16,
 };
 
-const ByteArray = struct {
-    data: std.ArrayList(u8),
-    head: usize = 0,
+// Storage managers manage access to individual files.
+// Each file is carved up into pages which we treat as a generic heap.
+// TODO track occupancy using an occupancy map rather than a list of pages.
+// This manager will never reclaim space.
+pub const Error = error{
+    Full,
+};
+
+// The storage manager only works with one file
+pub const Manager = struct {
+    file: *FileManager,
+    mem: std.mem.Allocator,
+    pages: []Page,
+    buffer: []u8,
+    op: u64 = 0,
+    latch: *Latch,
 
     const Self = @This();
 
-    pub fn init(sz: usize, mem: std.mem.Allocator) !Self {
-        var arr = try std.ArrayList(u8).initCapacity(mem, sz);
-        try arr.resize(sz);
-        return Self{
-            .data = arr,
-        };
-    }
+    pub fn init(file: *FileManager, bufferSize: usize, mem: std.mem.Allocator) !*Self {
+        const nPages = bufferSize / PAGE_SIZE;
+        var pages = try mem.alloc(Page, nPages);
 
-    pub fn deinit(self: Self) void {
-        self.data.deinit();
-    }
-    // Mostly for testing purposes
-    pub fn initWithBuffer(buffer: []u8, mem: std.mem.Allocator) Self {
-        return Self{
-            .data = std.ArrayList(u8).fromOwnedSlice(mem, buffer),
-        };
-    }
-
-    pub fn read(self: *Self, buffer: []u8) !usize {
-        std.debug.assert(self.head <= self.data.items.len);
-        const toCopy = self.data.items.len - self.head;
-        _ = std.mem.copy(u8, buffer[0..toCopy], self.data.items[self.head..(self.head + toCopy)]);
-        self.head += toCopy;
-        return toCopy;
-    }
-
-    pub fn write(self: *Self, buffer: []const u8) !usize {
-        std.debug.assert(self.head < self.data.capacity);
-        const len = buffer.len;
-        if (buffer.len + self.head > self.data.capacity) {
-            try self.data.resize(buffer.len + self.head);
+        var i: usize = 0;
+        while (i < nPages) : (i += 1) {
+            try pages[i].init(mem);
         }
-        _ = std.mem.copy(u8, self.data.items[self.head..(self.head + len)], buffer);
-        self.head += len;
-        return len;
+        // TODO: read the first page into memory and retrieve occupancy details
+        // TODO: how do I keep the directory in memory? must I pin/unpin it? this is messy...
+        // Could have the page directory be a linked list of pages that we treat as normal but
+        // that gets messy here...
+        // I'd prefer to forcibly map the root of the page directory and be done
+        // with it as that simplifies things.
+        // Once I have a working b-tree implementation that shouldn't be hard
+        // (I say that now)...
+        const mgr = try mem.create(Self);
+        mgr.file = file;
+        mgr.mem = mem;
+        mgr.pages = pages;
+        mgr.latch = try Latch.init(mem);
+
+        return mgr;
     }
 
-    pub fn seekTo(self: *Self, pos: usize) !void {
-        if (pos > self.data.items.len) {
-            return Error.SeekTooLarge;
+    pub fn deinit(self: *Self) !void {
+        var i: usize = 0;
+        _ = self.latch.exclusive();
+        while (i < self.pages.len) : (i += 1) {
+            var page = &self.pages[i];
+            try self.writeback(page);
+            try page.deinit();
         }
-        self.head = pos;
+        self.mem.free(self.pages);
+        self.mem.destroy(self.latch);
+        self.mem.destroy(self);
     }
 
-    pub fn extend(self: *Self, sz: usize) !void {
-        self.data.resize(sz);
+    fn writeback(self: *Self, page: *Page) !void {
+        var hold = page.latch.exclusive();
+        defer hold.release();
+        if (page.live and page.dirty) {
+            _ = try self.file.writeAll(page.id, page.buffer);
+            page.dirty = false;
+        }
     }
 
-    pub fn size(self: Self) !u64 {
-        return self.data.items.len;
+    pub fn pin(self: *Self, pageID: u64) anyerror!*Page {
+        var leastRecentlyUsed: usize = 0;
+        var lowestTs: usize = std.math.maxInt(usize);
+        var i: u16 = 0;
+
+        // TODO: can I better handle concurrent `pin` operations for unloaded pages?
+        // I want to avoid the situation where a page is loaded into two slots
+        // The currenty solution is to xlock the manager while we perform pin and unpin
+        // operations, and use that to serialize the loading and unloading of
+        // pages that have spilled to disk
+        var hold = self.latch.exclusive();
+        defer hold.release();
+        while (i < self.pages.len) : (i += 1) {
+            const page = &self.pages[i];
+            if (!page.live) {
+                lowestTs = 0;
+                leastRecentlyUsed = i;
+                break;
+            }
+            if (page.id == pageID) {
+                page.pin();
+                return page;
+            }
+            if (!page.pinned() and page.lastAccess < lowestTs) {
+                lowestTs = page.lastAccess;
+                leastRecentlyUsed = i;
+            }
+        }
+        if (lowestTs == std.math.maxInt(usize)) {
+            // No unpinned pages
+            return Error.Full;
+        }
+        var lru = &self.pages[leastRecentlyUsed];
+        try self.writeback(lru);
+        _ = try self.file.readAll(pageID, std.mem.sliceAsBytes(lru.buffer));
+        lru.id = pageID;
+        lru.dirty = false;
+        lru.live = true;
+        lru.pin();
+        return lru;
     }
 };
-
-pub const Buffer = File(
-    ByteArray,
-    ByteArray.read,
-    anyerror,
-    ByteArray.write,
-    anyerror,
-    ByteArray.seekTo,
-    anyerror,
-    ByteArray.extend,
-    anyerror,
-    ByteArray.size,
-    anyerror,
-);
-
-// *** Testing ***
-const testing = std.testing;
-const expect = testing.expect;
-test "ByteArrays can be read from" {
-    const buf = try testing.allocator.alloc(u8, 3);
-    buf[0] = 0x41;
-    buf[1] = 0x42;
-    buf[2] = 0x43;
-    var arr = ByteArray.initWithBuffer(buf, testing.allocator);
-    defer arr.deinit();
-
-    const buf2 = try testing.allocator.alloc(u8, 3);
-    defer testing.allocator.free(buf2);
-    try testing.expectEqual(@intCast(usize, 3), try arr.read(buf2));
-
-    const expected: []const u8 = &[_]u8{ 0x41, 0x42, 0x43 };
-    try testing.expectEqualSlices(u8, expected, buf2);
-    try testing.expectEqual(@intCast(usize, 0), try arr.read(buf2));
-}
-
-test "ByteArrays - write, seek, read" {
-    var arr = try ByteArray.init(3, testing.allocator);
-    defer arr.deinit();
-    const written = try arr.write(&[_]u8{ 0x41, 0x42, 0x43 });
-    try expect(written == 3);
-    // should be at EOF
-    const buf = try testing.allocator.alloc(u8, 3);
-    defer testing.allocator.free(buf);
-    try testing.expectEqual(@intCast(usize, 0), try arr.read(buf));
-
-    // seek to beginning
-    try arr.seekTo(0);
-    try testing.expectEqual(@intCast(usize, 3), try arr.read(buf));
-}
-
-test "extending ByteArrays" {
-    var arr = try ByteArray.init(3, testing.allocator);
-    defer arr.deinit();
-    const written = try arr.write(&[_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45 });
-    try expect(written == 5);
-}

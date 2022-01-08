@@ -21,14 +21,17 @@ pub fn main() !void {
     const dbfile = try openFile("init.zdb");
     defer dbfile.close();
     var fs = try storage.File.init(dbfile);
-    const mgr = try storage.Manager.init(&fs.manager, 4096 * 5, allocator);
+    const mgr = try storage.BufferManager.init(&fs.manager, storage.PAGE_SIZE * 5, allocator);
     defer {
         mgr.deinit() catch |err| {
             std.debug.print("failed to deinit manager: {any}\n", .{err});
         };
     }
 
-    var pin = try mgr.pin(0);
+    var pageDir = try storage.PageDirectory.init(allocator, mgr);
+    defer pageDir.deinit();
+
+    var pin = try pageDir.allocate();
     defer pin.unpin();
     var sharedPage = try Tuple.Readable.init(pin);
 
