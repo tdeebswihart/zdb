@@ -3,7 +3,7 @@ const File = @import("file.zig").File;
 
 const ByteList = std.ArrayList(u8);
 
-const Error = error {
+const Error = error{
     SeekTooLarge,
 };
 
@@ -13,7 +13,7 @@ const ByteArray = struct {
 
     const Self = @This();
 
-    pub fn init(sz: usize, mem: *std.mem.Allocator) !Self {
+    pub fn init(sz: usize, mem: std.mem.Allocator) !Self {
         var arr = try std.ArrayList(u8).initCapacity(mem, sz);
         try arr.resize(sz);
         return Self{
@@ -25,7 +25,7 @@ const ByteArray = struct {
         self.data.deinit();
     }
     // Mostly for testing purposes
-    pub fn initWithBuffer(buffer: []u8, mem: *std.mem.Allocator) Self {
+    pub fn initWithBuffer(buffer: []u8, mem: std.mem.Allocator) Self {
         return Self{
             .data = std.ArrayList(u8).fromOwnedSlice(mem, buffer),
         };
@@ -34,7 +34,7 @@ const ByteArray = struct {
     pub fn read(self: *Self, buffer: []u8) !usize {
         std.debug.assert(self.head <= self.data.items.len);
         const toCopy = self.data.items.len - self.head;
-        _ = std.mem.copy(u8, buffer[0..toCopy], self.data.items[self.head..(self.head+toCopy)]);
+        _ = std.mem.copy(u8, buffer[0..toCopy], self.data.items[self.head..(self.head + toCopy)]);
         self.head += toCopy;
         return toCopy;
     }
@@ -68,11 +68,16 @@ const ByteArray = struct {
 
 pub const Buffer = File(
     ByteArray,
-    ByteArray.read, anyerror,
-    ByteArray.write, anyerror,
-    ByteArray.seekTo, anyerror,
-    ByteArray.extend, anyerror,
-    ByteArray.size, anyerror,
+    ByteArray.read,
+    anyerror,
+    ByteArray.write,
+    anyerror,
+    ByteArray.seekTo,
+    anyerror,
+    ByteArray.extend,
+    anyerror,
+    ByteArray.size,
+    anyerror,
 );
 
 // *** Testing ***
@@ -90,7 +95,7 @@ test "ByteArrays can be read from" {
     defer testing.allocator.free(buf2);
     try testing.expectEqual(@intCast(usize, 3), try arr.read(buf2));
 
-    const expected: []const u8 = &[_]u8{0x41, 0x42, 0x43};
+    const expected: []const u8 = &[_]u8{ 0x41, 0x42, 0x43 };
     try testing.expectEqualSlices(u8, expected, buf2);
     try testing.expectEqual(@intCast(usize, 0), try arr.read(buf2));
 }
@@ -98,7 +103,7 @@ test "ByteArrays can be read from" {
 test "ByteArrays - write, seek, read" {
     var arr = try ByteArray.init(3, testing.allocator);
     defer arr.deinit();
-    const written = try arr.write(&[_]u8{0x41,0x42,0x43});
+    const written = try arr.write(&[_]u8{ 0x41, 0x42, 0x43 });
     try expect(written == 3);
     // should be at EOF
     const buf = try testing.allocator.alloc(u8, 3);
@@ -113,6 +118,6 @@ test "ByteArrays - write, seek, read" {
 test "extending ByteArrays" {
     var arr = try ByteArray.init(3, testing.allocator);
     defer arr.deinit();
-    const written = try arr.write(&[_]u8{0x41,0x42,0x43,0x44,0x45});
+    const written = try arr.write(&[_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45 });
     try expect(written == 5);
 }

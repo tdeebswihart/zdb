@@ -1,5 +1,6 @@
 const std = @import("std");
 const storage = @import("storage.zig");
+const Tuple = storage.Tuple;
 
 fn openFile(fpath: []const u8) !std.fs.File {
     const cwd = std.fs.cwd();
@@ -12,7 +13,7 @@ fn openFile(fpath: []const u8) !std.fs.File {
 pub fn main() !void {
     const stderr = std.io.getStdErr();
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = &gpa.allocator;
+    const allocator = gpa.allocator();
     defer {
         const leaked = gpa.deinit();
         if (leaked) stderr.writeAll("leaked memory\n") catch @panic("failed to write to stderr");
@@ -20,7 +21,7 @@ pub fn main() !void {
     const dbfile = try openFile("init.zdb");
     defer dbfile.close();
     var fs = try storage.File.init(dbfile);
-    const mgr = try storage.Manager.init(&fs.store, 4096, 4096 * 5, allocator);
+    const mgr = try storage.Manager.init(&fs.manager, 4096 * 5, allocator);
     defer {
         mgr.deinit() catch |err| {
             std.debug.print("failed to deinit manager: {any}\n", .{err});
@@ -29,12 +30,13 @@ pub fn main() !void {
 
     var pin = try mgr.pin(0);
     defer pin.unpin();
-    var sharedPage = pin.shared();
+    var sharedPage = try Tuple.Readable.init(pin);
 
     const b1: []const u8 = &[_]u8{ 0x41, 0x42, 0x43 };
-    const bytes = sharedPage.get(0) catch |_| {
+    const bytes = sharedPage.get(0) catch {
         sharedPage.deinit();
-        var xPage = pin.exclusive();
+        var xPage = try Tuple.Writable.init(pin);
+        defer xPage.deinit();
         const e2 = try xPage.put(b1);
         std.debug.print("wrote {any} to ({d},{d})\n", .{ e2, e2.page, e2.slot });
         return;

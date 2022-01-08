@@ -1,24 +1,12 @@
 const builtin = @import("builtin");
+const STORAGE_VERSION = @import("config.zig").STORAGE_VERSION;
+const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
 const std = @import("std");
 const fs = std.fs;
 const os = std.os;
 const fcntl = @cImport({
     @cInclude("fcntl.h");
 });
-
-pub const ReadError = error{
-    AccessDenied,
-    Interrupted,
-    NotOpenForReading,
-    Unexpected,
-};
-
-pub const WriteError = error{
-    NoSpaceLeft,
-    AccessDenied,
-    Unexpected,
-    NotOpenForWriting,
-};
 
 pub const SeekError = error{
     Unseekable,
@@ -37,20 +25,82 @@ pub const SizeError = error{
     Unexpected,
 };
 
-pub const Store = struct {
-    readFn: fn (*Store, []u8) ReadError!usize,
-    writeFn: fn (*Store, []const u8) WriteError!usize,
-    seekFn: fn (*Store, usize) SeekError!void,
-    extendFn: fn (*Store, usize) ExtendError!void,
-    sizeFn: fn (*Store) SizeError!usize,
+const C = SeekError || ExtendError;
+
+pub const ReadError = C || error{
+    AccessDenied,
+    Interrupted,
+    NotOpenForReading,
+    Unexpected,
+};
+
+pub const WriteError = C || error{
+    NoSpaceLeft,
+    AccessDenied,
+    Unexpected,
+    NotOpenForWriting,
+};
+
+// FILE HEADER
+// - u16 block size
+// - u16 number of pages
+// - number of pages bytes for the occupancy map
+pub const Header = struct {
+    version: u16 = STORAGE_VERSION,
+    pageSize: u16 = PAGE_SIZE,
+};
+
+pub const DiskError = WriteError || ReadError || error{
+    InvalidPageSize,
+};
+
+pub const Manager = struct {
+    readFn: fn (*Manager, []u8) ReadError!usize,
+    writeFn: fn (*Manager, []const u8) WriteError!usize,
+    seekFn: fn (*Manager, usize) SeekError!void,
+    extendFn: fn (*Manager, usize) ExtendError!void,
+    sizeFn: fn (*Manager) SizeError!usize,
 
     const Self = @This();
-    pub fn read(self: *Self, buffer: []u8) ReadError!usize {
+    pub fn init(self: *Self) DiskError!void {
+        const size = try self.sizeFn(self);
+        var hdr = Header{};
+        if (size == 0) {
+            // New file, write our initial header
+            const buffer = std.mem.asBytes(&hdr);
+            var index: usize = 0;
+            while (index != buffer.len) {
+                const amt = try self.writeFn(self, buffer[index..]);
+                if (amt == 0) break;
+                index += amt;
+            }
+        } else {
+            // read existing header
+            try self.seekFn(self, 0);
+            _ = try self.readFn(self, std.mem.asBytes(&hdr));
+            if (hdr.pageSize != PAGE_SIZE) {
+                std.debug.print("Expected page size {}, found {}", .{ PAGE_SIZE, hdr.pageSize });
+                return DiskError.InvalidPageSize;
+            }
+        }
+    }
+
+    fn seekTo(self: *Self, page: u64) C!void {
+        const offset = @sizeOf(Header) + page * PAGE_SIZE;
+        if (offset > try self.sizeFn(self)) {
+            try self.extendFn(self, offset + PAGE_SIZE);
+        }
+        try self.seekFn(self, offset);
+    }
+
+    pub fn read(self: *Self, page: u64, buffer: []u8) ReadError!usize {
+        try self.seekTo(self, page);
         return self.readFn(self, buffer);
     }
 
-    pub fn readAll(self: *Self, buffer: []u8) ReadError!usize {
+    pub fn readAll(self: *Self, page: u64, buffer: []u8) ReadError!usize {
         var index: usize = 0;
+        try self.seekTo(page);
         while (index != buffer.len) {
             const amt = try self.readFn(self, buffer[index..]);
             if (amt == 0) return index;
@@ -59,29 +109,19 @@ pub const Store = struct {
         return index;
     }
 
-    pub fn write(self: *Self, buffer: []const u8) WriteError!usize {
+    pub fn write(self: *Self, page: u64, buffer: []const u8) WriteError!usize {
+        try self.seekTo(self, page);
         return self.writeFn(self, buffer);
     }
 
-    pub fn writeAll(self: *Self, buffer: []const u8) WriteError!void {
+    pub fn writeAll(self: *Self, page: u64, buffer: []const u8) WriteError!void {
+        try self.seekTo(page);
         var index: usize = 0;
         while (index != buffer.len) {
             const amt = try self.writeFn(self, buffer[index..]);
             if (amt == 0) break;
             index += amt;
         }
-    }
-
-    pub fn seekTo(self: *Self, pos: usize) SeekError!void {
-        return self.seekFn(self, pos);
-    }
-
-    pub fn extend(self: *Self, sz: usize) ExtendError!void {
-        return self.extendFn(self, sz);
-    }
-
-    pub fn size(self: *Self) SizeError!usize {
-        return self.sizeFn(self);
     }
 };
 
@@ -99,15 +139,15 @@ fn initDirectIO(f: fs.File) !void {
 
 pub const File = struct {
     f: fs.File,
-    store: Store,
+    manager: Manager,
 
     const Self = @This();
 
     pub fn init(f: fs.File) !Self {
         try initDirectIO(f);
-        return Self{
+        var fm = Self{
             .f = f,
-            .store = .{
+            .manager = .{
                 .readFn = readImpl,
                 .writeFn = writeImpl,
                 .seekFn = seekImpl,
@@ -115,11 +155,13 @@ pub const File = struct {
                 .sizeFn = sizeImpl,
             },
         };
+        try fm.manager.init();
+        return fm;
     }
 
     const FReadError = fs.File.ReadError;
-    fn readImpl(store: *Store, buffer: []u8) ReadError!usize {
-        const self: fs.File = @fieldParentPtr(Self, "store", store).f;
+    fn readImpl(manager: *Manager, buffer: []u8) ReadError!usize {
+        const self: fs.File = @fieldParentPtr(Self, "manager", manager).f;
         return self.read(buffer) catch |err| return switch (err) {
             FReadError.AccessDenied => ReadError.AccessDenied,
             FReadError.NotOpenForReading => ReadError.NotOpenForReading,
@@ -128,8 +170,8 @@ pub const File = struct {
     }
 
     const FWriteError = fs.File.WriteError;
-    fn writeImpl(store: *Store, buffer: []const u8) WriteError!usize {
-        const self: fs.File = @fieldParentPtr(Self, "store", store).f;
+    fn writeImpl(manager: *Manager, buffer: []const u8) WriteError!usize {
+        const self: fs.File = @fieldParentPtr(Self, "manager", manager).f;
         return self.write(buffer) catch |err| return switch (err) {
             FWriteError.AccessDenied => WriteError.AccessDenied,
             FWriteError.NotOpenForWriting => WriteError.NotOpenForWriting,
@@ -139,8 +181,8 @@ pub const File = struct {
     }
 
     const FSeekError = fs.File.SeekError;
-    fn seekImpl(store: *Store, pos: usize) SeekError!void {
-        const self: fs.File = @fieldParentPtr(Self, "store", store).f;
+    fn seekImpl(manager: *Manager, pos: usize) SeekError!void {
+        const self: fs.File = @fieldParentPtr(Self, "manager", manager).f;
         return self.seekTo(pos) catch |err| return switch (err) {
             FSeekError.Unseekable => SeekError.Unseekable,
             else => SeekError.Unexpected,
@@ -148,8 +190,8 @@ pub const File = struct {
     }
 
     const FExtendError = fs.File.SetEndPosError;
-    fn extendImpl(store: *Store, sz: usize) ExtendError!void {
-        const self: fs.File = @fieldParentPtr(Self, "store", store).f;
+    fn extendImpl(manager: *Manager, sz: usize) ExtendError!void {
+        const self: fs.File = @fieldParentPtr(Self, "manager", manager).f;
         return self.setEndPos(sz) catch |err| return switch (err) {
             FExtendError.AccessDenied => ExtendError.AccessDenied,
             FExtendError.FileTooBig => ExtendError.TooBig,
@@ -159,8 +201,8 @@ pub const File = struct {
     }
 
     const FSizeError = fs.File.StatError;
-    fn sizeImpl(store: *Store) SizeError!usize {
-        const self: fs.File = @fieldParentPtr(Self, "store", store).f;
+    fn sizeImpl(manager: *Manager) SizeError!usize {
+        const self: fs.File = @fieldParentPtr(Self, "manager", manager).f;
         const st = self.stat() catch |err| return switch (err) {
             FSizeError.AccessDenied => SizeError.AccessDenied,
             else => SizeError.Unexpected,

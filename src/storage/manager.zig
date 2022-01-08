@@ -1,13 +1,12 @@
 const std = @import("std");
-const Store = @import("file.zig").Store;
+const FileManager = @import("file.zig").Manager;
+const DirectoryPage = @import("page.zig").DirectoryPage;
 const Page = @import("page.zig").Page;
 const PinnedPage = @import("page.zig").Pin;
 const SharedPage = @import("page.zig").SharedPage;
 const ExclusivePage = @import("page.zig").ExclusivePage;
-const Entry = @import("entry.zig").Entry;
 const Latch = @import("libdb").sync.Latch;
-
-const storageVersion = 1;
+const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
 
 const PageMetadata = struct {
     // page offset = sizeof header + sizeof directory + offset into directory *
@@ -20,27 +19,16 @@ const PageMetadata = struct {
 // TODO track occupancy using an occupancy map rather than a list of pages.
 // This manager will never reclaim space.
 //
-// FILE HEADER
-// - u16 block size
-// - u16 number of pages
-// - number of pages bytes for the occupancy map
-pub const Header = struct {
-    version: u16 = storageVersion,
-    page_size: u16 = 0,
-    pagesAllocated: u64 = 0,
-};
-
 pub const Error = error{
     Full,
 };
 
 // The storage manager only works with one file
 pub const Manager = struct {
-    header: Header,
-    file: *Store,
-    file_size: u64,
-    page_size: u16,
-    mem: *std.mem.Allocator,
+    file: *FileManager,
+    mem: std.mem.Allocator,
+    directoryPage: *Page,
+    directory: *DirectoryPage,
     pages: []Page,
     buffer: []u8,
     op: u64 = 0,
@@ -48,30 +36,13 @@ pub const Manager = struct {
 
     const Self = @This();
 
-    pub fn init(file: *Store, page_size: u16, buffer_size: usize, mem: *std.mem.Allocator) !*Self {
-        var hdr = Header{ .page_size = page_size };
-        const nPages = buffer_size / page_size;
+    pub fn init(file: *FileManager, bufferSize: usize, mem: std.mem.Allocator) !*Self {
+        const nPages = bufferSize / PAGE_SIZE;
         var pages = try mem.alloc(Page, nPages);
-        var buffer = try mem.alloc(u8, buffer_size);
 
         var i: usize = 0;
         while (i < nPages) : (i += 1) {
-            try pages[i].init(mem, buffer[i * page_size .. (i + 1) * page_size]);
-        }
-
-        var file_size: u64 = 0;
-
-        const size = try file.size();
-        if (size == 0) {
-            // New file, write our initial header
-            try file.writeAll(std.mem.asBytes(&hdr));
-            file_size = @sizeOf(Header);
-        } else {
-            file_size = size;
-            // read existing header
-            try file.seekTo(0);
-            _ = try file.read(std.mem.asBytes(&hdr));
-            std.debug.assert(hdr.page_size == page_size);
+            try pages[i].init(mem);
         }
         // TODO: read the first page into memory and retrieve occupancy details
         // TODO: how do I keep the directory in memory? must I pin/unpin it? this is messy...
@@ -82,34 +53,40 @@ pub const Manager = struct {
         // Once I have a working b-tree implementation that shouldn't be hard
         // (I say that now)...
         const mgr = try mem.create(Self);
-        mgr.header = hdr;
         mgr.file = file;
-        mgr.file_size = file_size;
         mgr.mem = mem;
         mgr.pages = pages;
-        mgr.buffer = buffer;
-        mgr.page_size = page_size;
         mgr.latch = try Latch.init(mem);
+        mgr.directoryPage = try mgr.pin(0);
+
+        mgr.directory = @ptrCast(*DirectoryPage, @alignCast(@alignOf(DirectoryPage), mgr.directoryPage.buffer));
 
         return mgr;
     }
 
     pub fn deinit(self: *Self) !void {
-        try self.file.seekTo(0);
-        try self.file.writeAll(std.mem.asBytes(&self.header));
         var i: usize = 0;
+        _ = self.latch.exclusive();
         while (i < self.pages.len) : (i += 1) {
             var page = &self.pages[i];
+            try self.writeback(page);
             try page.deinit();
         }
-        _ = self.latch.exclusive();
         self.mem.free(self.pages);
-        self.mem.free(self.buffer);
         self.mem.destroy(self.latch);
         self.mem.destroy(self);
     }
 
-    pub fn pin(self: *Self, pageID: u64) !PinnedPage {
+    fn writeback(self: *Self, page: *Page) !void {
+        var hold = page.latch.exclusive();
+        defer hold.release();
+        if (page.live and page.dirty) {
+            _ = try self.file.writeAll(page.id, page.buffer);
+            page.dirty = false;
+        }
+    }
+
+    pub fn pin(self: *Self, pageID: u64) !*Page {
         var leastRecentlyUsed: usize = 0;
         var lowestTs: usize = std.math.maxInt(usize);
         var i: u16 = 0;
@@ -129,7 +106,8 @@ pub const Manager = struct {
                 break;
             }
             if (page.id == pageID) {
-                return page.pin();
+                page.pin();
+                return page;
             }
             if (!page.pinned() and page.lastAccess < lowestTs) {
                 lowestTs = page.lastAccess;
@@ -141,52 +119,12 @@ pub const Manager = struct {
             return Error.Full;
         }
         var lru = &self.pages[leastRecentlyUsed];
-        try lru.writeback();
-        const offset = @sizeOf(Header) + self.page_size * pageID;
-        try lru.reinit(self.file, pageID, offset, self.page_size);
-        return lru.pin();
+        try self.writeback(lru);
+        _ = try self.file.readAll(pageID, std.mem.sliceAsBytes(lru.buffer));
+        lru.id = pageID;
+        lru.dirty = false;
+        lru.live = true;
+        lru.pin();
+        return lru;
     }
 };
-
-fn setup() !std.fs.File {
-    const tmp = try std.fs.openDirAbsolute("/tmp", .{});
-    return try tmp.createFile("test.zdb", .{
-        .read = true,
-        .truncate = true,
-        .lock = .Exclusive,
-    });
-}
-
-const t = std.testing;
-const File = @import("file.zig").File;
-test "pages can be written to" {
-    const dbfile = try setup();
-    defer dbfile.close();
-    var fs = try File.init(dbfile);
-    const mgr = try Manager.init(&fs.store, 512, 1024, t.allocator);
-
-    const expected: []const u8 = &[_]u8{ 0x41, 0x42, 0x43 };
-    var page = try mgr.pin(0);
-
-    var xPage = page.exclusive();
-    const loc = try xPage.put(expected);
-    xPage.deinit();
-    var shared = page.shared();
-    const found = try shared.get(loc.slot);
-    try t.expectEqualSlices(u8, found, expected);
-    shared.deinit();
-    page.unpin();
-    try mgr.deinit();
-}
-
-test "pinned pages are not evicted" {
-    const dbfile = try setup();
-    defer dbfile.close();
-    var fs = try File.init(dbfile);
-    const mgr = try Manager.init(&fs.store, 128, 128, t.allocator);
-
-    var page = try mgr.pin(0);
-    try t.expectError(Error.Full, mgr.pin(1));
-    page.unpin();
-    try mgr.deinit();
-}

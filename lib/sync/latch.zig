@@ -20,7 +20,7 @@ pub const Latch = struct {
 
     const Self = @This();
 
-    pub fn init(mem: *std.mem.Allocator) !*Self {
+    pub fn init(mem: std.mem.Allocator) !*Self {
         var l = try mem.create(Self);
         l.holds = 0;
         return l;
