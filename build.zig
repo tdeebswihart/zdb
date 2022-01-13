@@ -15,7 +15,7 @@ pub fn build(b: *std.build.Builder) void {
     var lib_tests = b.addTest("lib/sync/latch.zig");
     lib_tests.setBuildMode(mode);
 
-    var storage_tests = b.addTest("src/storage/tests.zig");
+    var storage_tests = b.addTest("src/tests.zig");
     storage_tests.addPackagePath("libdb", "lib/lib.zig");
     storage_tests.setBuildMode(mode);
 

@@ -79,7 +79,7 @@ pub const Manager = struct {
         }
     }
 
-    pub fn pin(self: *Self, pageID: u64) anyerror!*Page {
+    pub fn pin(self: *Self, pageID: u32) anyerror!*Page {
         var leastRecentlyUsed: usize = 0;
         var lowestTs: usize = std.math.maxInt(usize);
         var i: u16 = 0;

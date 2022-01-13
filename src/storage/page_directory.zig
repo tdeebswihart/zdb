@@ -77,7 +77,7 @@ pub const Directory = struct {
         return try self.bufmgr.pin(pageID);
     }
 
-    pub fn free(self: Self, pageID: u64) void {
+    pub fn free(self: Self, pageID: u32) !void {
         var hold = self.latch.shared();
         defer hold.release();
         var dirPage = self.headPage orelse {
@@ -89,20 +89,24 @@ pub const Directory = struct {
         while (pageID > dir.id + nPages) {
             pageHold.release();
             if (dir != self.head) {
-                dir.unpin();
+                dirPage.unpin();
             }
             // go to the next dirPageectory
-            dirPage = try self.bufmgr.pin(dirPage.next);
+            dirPage = try self.bufmgr.pin(dir.next);
             pageHold = dirPage.latch.shared();
             dir = DirectoryPage.from(dirPage);
         }
         // found the right page
         pageHold.release();
-        pageHold = dir.exclusive();
+        pageHold = dirPage.latch.exclusive();
 
         dir.free(pageID);
         // Scribble out the page's contents
-        @memset(dirPage.buffer, 0x41, PAGE_SIZE);
+        var page = try self.bufmgr.pin(pageID);
+        defer page.unpin();
+        var ph = page.latch.exclusive();
+        defer ph.release();
+        for (page.buffer) |*b| b.* = 0x41;
         dirPage.dirty = true;
 
         pageHold.release();
@@ -119,8 +123,8 @@ const nPages = (PAGE_SIZE - 16);
 /// The page directory is composed of a linked list of DirectoryPage structures
 pub const DirectoryPage = struct {
     // The number of pages a directoryPage can manage
-    id: u64,
-    next: u64,
+    id: u32,
+    next: u32,
     freePages: [nPages]u1,
 
     const Self = @This();
@@ -149,10 +153,10 @@ pub const DirectoryPage = struct {
         return true;
     }
 
-    pub fn allocate(self: *Self) ?u64 {
+    pub fn allocate(self: *Self) ?u32 {
         for (self.freePages) |available, idx| {
             if (available == 1) {
-                const pageID = self.id + idx + 1;
+                const pageID: u32 = self.id + @intCast(u32, idx) + 1;
                 self.freePages[idx] = 0;
                 return pageID;
             }

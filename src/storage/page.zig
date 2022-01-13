@@ -9,7 +9,7 @@ const assert = std.debug.assert;
 // deleted blocks so there are no gaps in the file.
 pub const Page = struct {
     live: bool = false,
-    id: u64 = 0,
+    id: u32 = 0,
     lastAccess: usize = 0,
     pins: u64 = 0,
     dirty: bool = false,

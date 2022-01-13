@@ -3,10 +3,12 @@ const t = std.testing;
 const BufferManager = @import("buffer.zig").Manager;
 const tuple = @import("tuple.zig");
 const FileManager = @import("file.zig").Manager;
+const PageDirectory = @import("page_directory.zig").Directory;
 const File = @import("file.zig").File;
 const allocPrint = std.fmt.allocPrint;
 const alloc = t.allocator;
 const panic = std.debug.panic;
+const expect = t.expect;
 
 pub const Test = struct {
     runid: usize,
@@ -15,6 +17,7 @@ pub const Test = struct {
     fs: *File,
     mgr: FileManager,
     bm: *BufferManager,
+    pd: PageDirectory,
 
     pub fn setup(nPages: usize) !@This() {
         var prng = std.rand.DefaultPrng.init(0).random();
@@ -32,11 +35,13 @@ pub const Test = struct {
         var mgr = fs.manager();
         errdefer mgr.deinit();
         const bm = try BufferManager.init(mgr, nPages, alloc);
-        return @This(){ .runid = id, .path = path, .rng = prng, .fs = fs, .mgr = mgr, .bm = bm };
+        var pd = try PageDirectory.init(alloc, bm);
+        return @This(){ .runid = id, .path = path, .rng = prng, .fs = fs, .mgr = mgr, .bm = bm, .pd = pd };
     }
 
     pub fn teardownKeepData(self: *@This()) !void {
         defer self.mgr.deinit();
+        self.pd.deinit();
         try self.bm.deinit();
     }
 
@@ -53,12 +58,23 @@ pub const Test = struct {
     }
 };
 
+// *** Paging ***
 test "pinned pages are not evicted when space is needed" {
     var ctx = try Test.setup(1);
     defer ctx.teardown();
 
     var page = try ctx.bm.pin(0);
     try t.expectError(BufferManager.Error.Full, ctx.bm.pin(1));
+    page.unpin();
+}
+
+test "unpinned pages are evicted when space is needed" {
+    var ctx = try Test.setup(2);
+    defer ctx.teardown();
+
+    var page = try ctx.bm.pin(0);
+    page.unpin();
+    page = try ctx.bm.pin(1);
     page.unpin();
 }
 
@@ -77,4 +93,28 @@ test "tuple pages can be written to" {
     try t.expectEqualSlices(u8, found, expected);
     shared.deinit();
     page.unpin();
+}
+
+// *** Hash Table ***
+const HashTable = @import("hashtable.zig").HashTable;
+test "new hash tables can be created" {
+    var ctx = try Test.setup(10);
+    defer ctx.teardown();
+
+    var ht = try HashTable(u16, u16).new(alloc, ctx.bm, ctx.pd);
+    try ht.destroy();
+}
+
+test "hashtables can store and retrieve values" {
+    var ctx = try Test.setup(10);
+    defer ctx.teardown();
+
+    var ht = try HashTable(u16, u16).new(alloc, ctx.bm, ctx.pd);
+    defer ht.destroy() catch |e| panic("{s}", .{e});
+
+    try expect(try ht.put(0, 1));
+    try expect(try ht.put(0, 2));
+    var results = std.ArrayList(u16).init(alloc);
+    try ht.get(0, &results);
+    try t.expectEqualSlices(u16, &[_]u16{ 1, 2 }, results.items);
 }
