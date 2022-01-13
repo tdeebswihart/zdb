@@ -1,6 +1,6 @@
 const std = @import("std");
 const storage = @import("storage.zig");
-const Tuple = storage.Tuple;
+const tuple = storage.tuple;
 
 fn openFile(fpath: []const u8) !std.fs.File {
     const cwd = std.fs.cwd();
@@ -19,26 +19,27 @@ pub fn main() !void {
         if (leaked) stderr.writeAll("leaked memory\n") catch @panic("failed to write to stderr");
     }
     const dbfile = try openFile("init.zdb");
-    defer dbfile.close();
-    var fs = try storage.File.init(dbfile);
-    const mgr = try storage.BufferManager.init(&fs.manager, storage.PAGE_SIZE * 5, allocator);
+    var fs = try storage.File.init(allocator, dbfile);
+    var mgr = fs.manager();
+    defer mgr.deinit();
+    const bm = try storage.BufferManager.init(fs.manager(), 50, allocator);
     defer {
-        mgr.deinit() catch |err| {
+        bm.deinit() catch |err| {
             std.debug.print("failed to deinit manager: {any}\n", .{err});
         };
     }
 
-    var pageDir = try storage.PageDirectory.init(allocator, mgr);
+    var pageDir = try storage.PageDirectory.init(allocator, bm);
     defer pageDir.deinit();
 
     var pin = try pageDir.allocate();
     defer pin.unpin();
-    var sharedPage = try Tuple.Readable.init(pin);
+    var sharedPage = try tuple.Readable.init(pin);
 
     const b1: []const u8 = &[_]u8{ 0x41, 0x42, 0x43 };
     const bytes = sharedPage.get(0) catch {
         sharedPage.deinit();
-        var xPage = try Tuple.Writable.init(pin);
+        var xPage = try tuple.Writable.init(pin);
         defer xPage.deinit();
         const e2 = try xPage.put(b1);
         std.debug.print("wrote {any} to ({d},{d})\n", .{ e2, e2.page, e2.slot });

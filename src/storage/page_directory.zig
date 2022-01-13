@@ -66,7 +66,7 @@ pub const Directory = struct {
 
         const pageID = dir.allocate() orelse {
             assert(false);
-            return Error.Invalid;
+            unreachable;
         };
         page.dirty = true;
 
@@ -77,7 +77,7 @@ pub const Directory = struct {
         return try self.bufmgr.pin(pageID);
     }
 
-    pub fn free(self: Self, page: *Page) void {
+    pub fn free(self: Self, pageID: u64) void {
         var hold = self.latch.shared();
         defer hold.release();
         var dirPage = self.headPage orelse {
@@ -86,10 +86,10 @@ pub const Directory = struct {
         };
         var dir = self.head;
         var pageHold: LatchHold = dirPage.latch.shared();
-        while (page.id > dir.id + nPages) {
+        while (pageID > dir.id + nPages) {
             pageHold.release();
             if (dir != self.head) {
-                page.unpin();
+                dir.unpin();
             }
             // go to the next dirPageectory
             dirPage = try self.bufmgr.pin(dirPage.next);
@@ -100,8 +100,9 @@ pub const Directory = struct {
         pageHold.release();
         pageHold = dir.exclusive();
 
-        dir.free(page);
-        @memset(dirPage.buffer, 0, PAGE_SIZE);
+        dir.free(pageID);
+        // Scribble out the page's contents
+        @memset(dirPage.buffer, 0x41, PAGE_SIZE);
         dirPage.dirty = true;
 
         pageHold.release();
@@ -159,8 +160,8 @@ pub const DirectoryPage = struct {
         return null;
     }
 
-    pub fn free(self: *Self, page: *Page) void {
-        const offset = page.id - self.id;
+    pub fn free(self: *Self, pageID: u64) void {
+        const offset = pageID - self.id;
         self.freePages[offset] = 1;
     }
 };

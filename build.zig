@@ -12,15 +12,16 @@ pub fn build(b: *std.build.Builder) void {
 
     exe.setOutputDir("zig-cache");
 
-    var main_tests = b.addTest("src/main.zig");
-    main_tests.setBuildMode(mode);
-    var storage_tests = b.addTest("src/storage/manager.zig");
+    var lib_tests = b.addTest("lib/sync/latch.zig");
+    lib_tests.setBuildMode(mode);
+
+    var storage_tests = b.addTest("src/storage/tests.zig");
     storage_tests.addPackagePath("libdb", "lib/lib.zig");
     storage_tests.setBuildMode(mode);
 
-    const test_step = b.step("test", "Run library tests");
+    const test_step = b.step("test", "Run tests");
     test_step.dependOn(&storage_tests.step);
-    test_step.dependOn(&main_tests.step);
+    test_step.dependOn(&lib_tests.step);
 
     const run_cmd = exe.run();
     run_cmd.step.dependOn(b.getInstallStep());

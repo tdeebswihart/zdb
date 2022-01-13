@@ -17,13 +17,10 @@ const PageMetadata = struct {
 // Each file is carved up into pages which we treat as a generic heap.
 // TODO track occupancy using an occupancy map rather than a list of pages.
 // This manager will never reclaim space.
-pub const Error = error{
-    Full,
-};
 
 // The storage manager only works with one file
 pub const Manager = struct {
-    file: *FileManager,
+    file: FileManager,
     mem: std.mem.Allocator,
     pages: []Page,
     buffer: []u8,
@@ -32,8 +29,11 @@ pub const Manager = struct {
 
     const Self = @This();
 
-    pub fn init(file: *FileManager, bufferSize: usize, mem: std.mem.Allocator) !*Self {
-        const nPages = bufferSize / PAGE_SIZE;
+    pub const Error = error{
+        Full,
+    };
+
+    pub fn init(file: FileManager, nPages: usize, mem: std.mem.Allocator) !*Self {
         var pages = try mem.alloc(Page, nPages);
 
         var i: usize = 0;
