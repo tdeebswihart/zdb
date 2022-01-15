@@ -119,3 +119,19 @@ test "hashtables can store and retrieve values" {
     try ht.get(0, &results);
     try t.expectEqualSlices(u16, &[_]u16{ 1, 2 }, results.items);
 }
+
+test "hashtable values can be removed" {
+    var ctx = try Test.setup(10);
+    defer ctx.teardown();
+
+    var ht = try HashTable(u16, u16).new(alloc, ctx.bm, ctx.pd);
+    defer ht.destroy() catch |e| panic("{s}", .{e});
+
+    try expect(try ht.put(0, 1));
+    try expect(try ht.put(0, 2));
+    try ht.remove(0, 1);
+    var results = std.ArrayList(u16).init(alloc);
+    defer results.deinit();
+    try ht.get(0, &results);
+    try t.expectEqualSlices(u16, &[_]u16{2}, results.items);
+}

@@ -1,10 +1,10 @@
 const std = @import("std");
 const Latch = @import("libdb").sync.Latch;
-const LatchHold = @import("libdb").sync.LatchHold;
 const assert = std.debug.assert;
 const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
 const buffer = @import("buffer.zig");
 const Page = @import("page.zig").Page;
+const LatchedPage = @import("page.zig").LatchedPage;
 
 pub const Error = error{
     WrongDirectory,
@@ -52,7 +52,7 @@ pub const Directory = struct {
             return Error.Invalid;
         };
         var dir = self.head;
-        var pageHold: LatchHold = page.latch.shared();
+        var pageHold = page.latch.shared();
         while (dir.full()) {
             pageHold.release();
             if (dir != self.head) {
@@ -77,6 +77,18 @@ pub const Directory = struct {
         return try self.bufmgr.pin(pageID);
     }
 
+    pub fn allocLatched(self: Self, kind: Latch.Kind) anyerror!LatchedPage {
+        const page = try self.allocate();
+        var hold = switch (kind) {
+            .shared => page.latch.shared(),
+            .exclusive => page.latch.exclusive(),
+        };
+        return LatchedPage{
+            .page = page,
+            .hold = hold,
+        };
+    }
+
     pub fn free(self: Self, pageID: u32) !void {
         var hold = self.latch.shared();
         defer hold.release();
@@ -85,7 +97,7 @@ pub const Directory = struct {
             return;
         };
         var dir = self.head;
-        var pageHold: LatchHold = dirPage.latch.shared();
+        var pageHold = dirPage.latch.shared();
         while (pageID > dir.id + nPages) {
             pageHold.release();
             if (dir != self.head) {

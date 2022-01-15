@@ -38,6 +38,7 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
     const Entry = struct { key: K, val: V };
     return struct {
         pub const maxEntries = 4 * PAGE_SIZE / (4 * @sizeOf(Entry) + 1);
+
         pageID: u64,
         occupied: [maxEntries]u1,
         // 0 if tombstoned or unoccupied
@@ -63,6 +64,23 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
             return self.data[i];
         }
 
+        pub fn insert(self: *Self, key: K, val: V, initIdx: u16) bool {
+            if (self.put(initIdx, key, val)) {
+                return true;
+            }
+            // Wrap around until we find a space
+            var i = initIdx + 1;
+            while (i != initIdx) : (i += 1) {
+                if (i > Self.maxEntries) {
+                    i = 0;
+                }
+                if (self.put(i, key, val)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         pub fn put(self: *Self, i: u16, key: K, val: V) bool {
             if (self.readable[i] == 1) {
                 return false;
@@ -73,8 +91,8 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
             return true;
         }
 
-        pub fn remove(self: *Self, i: u16, key: K) void {
-            if (self.data[i].key == key) {
+        pub fn remove(self: *Self, i: u16, key: K, val: V) void {
+            if (self.data[i].key == key and self.data[i].val == val) {
                 self.readable[i] = 0;
             }
         }
@@ -109,27 +127,23 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             var dirhold = ht.dirPage.latch.exclusive();
             defer dirhold.release();
 
-            var b1p = try pageDir.allocate();
-            defer b1p.unpin();
-            var b1l = b1p.latch.exclusive();
-            defer b1l.release();
-            _ = Bucket.init(b1p);
+            var b1 = try pageDir.allocLatched(.exclusive);
+            defer b1.deinit();
+            _ = Bucket.init(b1.page);
 
-            var b2p = try pageDir.allocate();
-            defer b2p.unpin();
-            var b2l = b2p.latch.exclusive();
-            defer b2l.release();
-            _ = Bucket.init(b2p);
+            var b2 = try pageDir.allocLatched(.exclusive);
+            defer b2.deinit();
+            _ = Bucket.init(b2.page);
 
             dir.globalDepth = 1;
             // set up our first two buckets
             dir.localDepths[0] = 1;
             dir.localDepths[1] = 1;
-            dir.bucketPageIDs[0] = b1p.id;
-            dir.bucketPageIDs[1] = b2p.id;
+            dir.bucketPageIDs[0] = b1.page.id;
+            dir.bucketPageIDs[1] = b2.page.id;
 
-            b1p.dirty = true;
-            b2p.dirty = true;
+            b1.page.dirty = true;
+            b2.page.dirty = true;
             ht.dirPage.dirty = true;
             return ht;
         }
@@ -234,25 +248,18 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
 
             var b = Bucket.init(bp);
             var localIdx: u16 = self.localIndex(hsh);
-            if (b.put(localIdx, key, val)) {
+            if (b.insert(key, val, localIdx)) {
                 return true;
             }
-            // Wrap around until we find a space
-            var i = localIdx + 1;
-            while (i != localIdx) : (i += 1) {
-                if (i > Bucket.maxEntries) {
-                    i = 0;
-                }
-                if (b.put(i, key, val)) {
-                    return true;
-                }
-            }
 
-            const mirror = try self.pageDir.allocate();
-            defer mirror.unpin();
-            var mh = mirror.latch.exclusive();
-            defer mh.release();
-            var mb = Bucket.init(mirror);
+            var mirror = try self.pageDir.allocLatched(.exclusive);
+            defer mirror.deinit();
+            var mb = Bucket.init(mirror.page);
+
+            // Replace self.
+            var replacement = try self.pageDir.allocLatched(.exclusive);
+            defer replacement.deinit();
+            var rb = Bucket.init(replacement.page);
 
             d.localDepths[idx] += 1;
             const newIdx = idx << 1;
@@ -270,7 +277,8 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
                     d.bucketPageIDs[last << 1 + 1] = d.bucketPageIDs[last];
                     d.localDepths[last << 1 + 1] = d.localDepths[last];
                 }
-                d.bucketPageIDs[mirrorIdx] = mirror.id;
+                d.bucketPageIDs[mirrorIdx] = mirror.page.id;
+                d.bucketPageIDs[newIdx] = replacement.page.id;
                 d.globalDepth += 1;
                 // Recalculate insertion idx
                 idx = self.prefix(hsh);
@@ -280,64 +288,62 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
                 var taken: u32 = 0;
                 while (taken < toOccupy) : (taken += 1) {
                     d.localDepths[newIdx + taken] = d.localDepths[idx];
-                    d.bucketPageIDs[newIdx + taken] = bp.id;
+                    d.bucketPageIDs[newIdx + taken] = replacement.page.id;
                 }
                 taken = 0;
                 while (taken < toOccupy) : (taken += 1) {
                     d.localDepths[mirrorIdx + taken] = d.localDepths[idx];
-                    d.bucketPageIDs[mirrorIdx + taken] = mirror.id;
+                    d.bucketPageIDs[mirrorIdx + taken] = mirror.page.id;
                 }
             }
 
-            var mirrorOffset: u16 = 0;
-            var baseFirstAvailable = @intCast(u16, b.readable.len);
-            i = 0;
-            while (i < Bucket.maxEntries and b.occupied[i] == 1) : (i += 1) {
+            var i: u16 = 0;
+            while (i < Bucket.maxEntries) : (i += 1) {
                 if (b.readable[i] == 1) {
                     const e = b.data[i];
                     const ehsh = self.checksum(e.key);
                     if (self.prefix(ehsh) == mirrorIdx) {
-                        assert(mb.put(mirrorOffset, e.key, e.val));
-                        mirrorOffset += 1;
-                        b.forceRemove(i);
-                        baseFirstAvailable = i;
+                        assert(mb.insert(e.key, e.val, self.localIndex(ehsh)));
+                    } else {
+                        assert(rb.put(e.key, e.val, self.localIndex(ehsh)));
                     }
                 }
             }
 
+            // We're splitting so are replacing this page
+            try self.pageDir.free(bp.id);
+
             if (idx == mirrorIdx) {
-                return mb.put(mirrorOffset, key, val);
+                return mb.insert(key, val, self.localIndex(hsh));
             } else {
                 return try self.put(key, val);
             }
         }
 
         /// FIXME: merge pages if their load is below a certain amount
-        pub fn remove(self: Self, key: K) ?V {
+        pub fn remove(self: Self, key: K, val: V) anyerror!void {
             const hsh = self.checksum(key);
             const pfx = self.prefix(hsh);
             var hold = self.latch.shared();
             defer hold.release();
 
-            const bp = try self.bm.pin(self.directory.bucketPageIDs[pfx]);
-            defer bp.unpin();
-            var bh = bp.latch.exclusive();
-            defer bh.release();
+            var base = try self.bm.pinLatched(self.directory.bucketPageIDs[pfx], .exclusive);
+            defer base.deinit();
 
-            var b = Bucket.init(bp);
+            var b = Bucket.init(base.page);
             var localIdx: u16 = self.localIndex(hsh);
             // Not inserted
             if (b.occupied[localIdx] == 0) {
                 return;
             }
-            b.remove(localIdx, key);
+            b.remove(localIdx, key, val);
             // Wrap around until we find a space
             var i = localIdx + 1;
             while (i != localIdx and b.occupied[i] == 1) : (i += 1) {
                 if (i > Bucket.maxEntries) {
                     i = 0;
                 }
-                b.remove(i, key);
+                b.remove(i, key, val);
             }
         }
     };

@@ -2,7 +2,7 @@ const std = @import("std");
 const FileManager = @import("file.zig").Manager;
 const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
 const Page = @import("page.zig").Page;
-const LatchHold = @import("libdb").sync.LatchHold;
+const Latch = @import("libdb").sync.Latch;
 const Crc32 = std.hash.Crc32;
 const Entry = @import("entry.zig").Entry;
 const assert = std.debug.assert;
@@ -87,7 +87,7 @@ pub const TuplePage = struct {
 
 pub const Readable = struct {
     page: *Page,
-    hold: LatchHold,
+    hold: Latch.Hold,
     inner: ?*TuplePage,
 
     pub fn init(page: *Page) !@This() {
@@ -114,7 +114,7 @@ pub const Readable = struct {
 
 pub const Writable = struct {
     inner: ?*TuplePage,
-    hold: LatchHold,
+    hold: Latch.Hold,
     page: *Page,
 
     pub fn init(page: *Page) !@This() {

@@ -3,22 +3,23 @@ const maxInt = @import("std").math.maxInt;
 
 const State = u64;
 
-/// Holds are not valid for concurrent use
-pub const Hold = struct {
-    shares: State,
-    latch: *Latch,
-
-    /// Holds are no longer valid after calling release.
-    pub fn release(self: *@This()) void {
-        _ = @atomicRmw(u64, &self.latch.holds, .Sub, self.shares, .Release);
-        self.latch = undefined;
-    }
-};
-
 pub const Latch = struct {
     holds: State = 0,
 
     const Self = @This();
+
+    pub const Kind = enum { shared, exclusive };
+    /// Holds are not valid for concurrent use
+    pub const Hold = struct {
+        shares: State,
+        latch: *Latch,
+
+        /// Holds are no longer valid after calling release.
+        pub fn release(self: *@This()) void {
+            _ = @atomicRmw(u64, &self.latch.holds, .Sub, self.shares, .Release);
+            self.latch = undefined;
+        }
+    };
 
     pub fn init(mem: std.mem.Allocator) !*Self {
         var l = try mem.create(Self);

@@ -1,6 +1,7 @@
 const std = @import("std");
 const FileManager = @import("file.zig").Manager;
 const Page = @import("page.zig").Page;
+const LatchedPage = @import("page.zig").LatchedPage;
 const PinnedPage = @import("page.zig").Pin;
 const SharedPage = @import("page.zig").SharedPage;
 const ExclusivePage = @import("page.zig").ExclusivePage;
@@ -40,14 +41,6 @@ pub const Manager = struct {
         while (i < nPages) : (i += 1) {
             try pages[i].init(mem);
         }
-        // TODO: read the first page into memory and retrieve occupancy details
-        // TODO: how do I keep the directory in memory? must I pin/unpin it? this is messy...
-        // Could have the page directory be a linked list of pages that we treat as normal but
-        // that gets messy here...
-        // I'd prefer to forcibly map the root of the page directory and be done
-        // with it as that simplifies things.
-        // Once I have a working b-tree implementation that shouldn't be hard
-        // (I say that now)...
         const mgr = try mem.create(Self);
         mgr.file = file;
         mgr.mem = mem;
@@ -86,8 +79,8 @@ pub const Manager = struct {
 
         // TODO: can I better handle concurrent `pin` operations for unloaded pages?
         // I want to avoid the situation where a page is loaded into two slots
-        // The currenty solution is to xlock the manager while we perform pin and unpin
-        // operations, and use that to serialize the loading and unloading of
+        // The current solution is to xlock the manager while we pin
+        // and use that to serialize the loading and unloading of
         // pages that have spilled to disk
         var hold = self.latch.exclusive();
         defer hold.release();
@@ -119,5 +112,17 @@ pub const Manager = struct {
         lru.live = true;
         lru.pin();
         return lru;
+    }
+
+    pub fn pinLatched(self: *Self, pageID: u32, kind: Latch.Kind) anyerror!LatchedPage {
+        const page = try self.pin(pageID);
+        var hold = switch (kind) {
+            .shared => page.latch.shared(),
+            .exclusive => page.latch.exclusive(),
+        };
+        return LatchedPage{
+            .page = page,
+            .hold = hold,
+        };
     }
 };

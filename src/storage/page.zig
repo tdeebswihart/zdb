@@ -3,6 +3,15 @@ const Latch = @import("libdb").sync.Latch;
 const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
 const assert = std.debug.assert;
 
+pub const LatchedPage = struct {
+    page: *Page,
+    hold: Latch.Hold,
+
+    pub fn deinit(self: *@This()) void {
+        self.hold.release();
+        self.page.unpin();
+    }
+};
 // Each block is of fixed length and acts as a bump-up
 // allocator for contained records.
 // A periodic compaction (or vacuum) process should clean up
