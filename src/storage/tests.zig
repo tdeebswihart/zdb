@@ -115,6 +115,7 @@ test "hashtables can store and retrieve values" {
     try expect(try ht.put(0, 1));
     try expect(try ht.put(0, 2));
     var results = std.ArrayList(u16).init(alloc);
+    defer results.deinit();
     try ht.get(0, &results);
     try t.expectEqualSlices(u16, &[_]u16{ 1, 2 }, results.items);
 }

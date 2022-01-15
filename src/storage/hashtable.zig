@@ -26,6 +26,7 @@ pub const DirectoryPage = struct {
             self.globalDepth = 0;
             for (self.localDepths) |*b| b.* = 1;
             for (self.bucketPageIDs) |*b| b.* = 0;
+            self.pageID = page.id;
         }
         return self;
     }
@@ -50,12 +51,12 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
             if (self.pageID != page.id) {
                 for (self.occupied) |*b| b.* = 0;
                 for (self.readable) |*b| b.* = 0;
+                self.pageID = page.id;
             }
             return self;
         }
 
         pub fn get(self: *Self, i: u16) ?Entry {
-            assert(i < maxEntries);
             if (self.readable[i] == 0) {
                 return null;
             }
@@ -185,6 +186,11 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             return hsh & mask;
         }
 
+        inline fn localIndex(self: Self, hsh: u64) u16 {
+            // idc if we're truncating here
+            return @intCast(u16, 0xFFFF & (hsh >> @intCast(u6, self.directory.globalDepth))) % Bucket.maxEntries;
+        }
+
         pub fn get(self: Self, key: K, results: *ArrayList) !void {
             const hsh = self.checksum(key);
             const pfx = self.prefix(hsh);
@@ -197,12 +203,19 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             defer bh.release();
 
             var b = Bucket.init(bp);
-            var i: u16 = 0;
-            while (b.occupied[i] == 1 and i < Bucket.maxEntries) {
+            var localIdx = self.localIndex(hsh);
+            if (b.get(@intCast(u16, localIdx))) |entry| {
+                try results.append(entry.val);
+            }
+
+            var i = localIdx + 1;
+            while (i != localIdx and b.occupied[i] == 1) : (i += 1) {
+                if (i > Bucket.maxEntries) {
+                    i = 0;
+                }
                 if (b.get(@intCast(u16, i))) |entry| {
                     try results.append(entry.val);
                 }
-                i += 1;
             }
         }
 
@@ -220,8 +233,16 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             defer bh.release();
 
             var b = Bucket.init(bp);
-            var i: u16 = 0;
-            while (i < Bucket.maxEntries) : (i += 1) {
+            var localIdx: u16 = self.localIndex(hsh);
+            if (b.put(localIdx, key, val)) {
+                return true;
+            }
+            // Wrap around until we find a space
+            var i = localIdx + 1;
+            while (i != localIdx) : (i += 1) {
+                if (i > Bucket.maxEntries) {
+                    i = 0;
+                }
                 if (b.put(i, key, val)) {
                     return true;
                 }
@@ -304,10 +325,19 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             defer bh.release();
 
             var b = Bucket.init(bp);
-            var i: u16 = 0;
-            while (b.occupied[i] == 1 and i < Bucket.maxEntries) {
+            var localIdx: u16 = self.localIndex(hsh);
+            // Not inserted
+            if (b.occupied[localIdx] == 0) {
+                return;
+            }
+            b.remove(localIdx, key);
+            // Wrap around until we find a space
+            var i = localIdx + 1;
+            while (i != localIdx and b.occupied[i] == 1) : (i += 1) {
+                if (i > Bucket.maxEntries) {
+                    i = 0;
+                }
                 b.remove(i, key);
-                i += 1;
             }
         }
     };
