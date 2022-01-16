@@ -12,21 +12,22 @@ const PageDirectory = @import("page_directory.zig").Directory;
 
 pub const DirectoryPage = struct {
     pageID: u32,
-    /// Log sequence number
     lsn: u32,
     globalDepth: u32,
     localDepths: [512]u8,
     bucketPageIDs: [512]u32,
+    pageLoads: [512]u8,
 
     const Self = @This();
 
     pub fn init(page: *Page) *Self {
-        var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer));
+        var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer[0..]));
         if (self.pageID != page.id) {
             self.lsn = 0;
             self.globalDepth = 0;
             for (self.localDepths) |*b| b.* = 1;
             for (self.bucketPageIDs) |*b| b.* = 0;
+            for (self.pageLoads) |*b| b.* = 0;
             self.pageID = page.id;
         }
         return self;
@@ -52,7 +53,7 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
         const Self = @This();
 
         pub fn init(page: *Page) *Self {
-            var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer));
+            var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer[0..]));
             if (self.pageID != page.id) {
                 for (self.occupied) |*b| b.* = 0;
                 for (self.readable) |*b| b.* = 0;
@@ -198,6 +199,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             self.directory = undefined;
             h.release();
             self.mem.destroy(self.latch);
+            self.* = undefined;
         }
 
         inline fn checksum(self: Self, key: K) u64 {
@@ -341,12 +343,11 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
 
             var b = Bucket.init(base.page);
             var localIdx: u16 = self.localIndex(hsh);
-            // Not inserted
             if (b.occupied[localIdx] == 0) {
                 return;
             }
             b.remove(localIdx, key, val);
-            // Wrap around until we find a space
+
             var i = localIdx + 1;
             while (i != localIdx and b.occupied[i] == 1) : (i += 1) {
                 if (i > Bucket.maxEntries) {

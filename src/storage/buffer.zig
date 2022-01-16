@@ -61,13 +61,14 @@ pub const Manager = struct {
         self.mem.free(self.pages);
         self.mem.destroy(self.latch);
         self.mem.destroy(self);
+        //self.* = undefined;
     }
 
     fn writeback(self: *Self, page: *Page) !void {
         var hold = page.latch.exclusive();
         defer hold.release();
         if (page.live and page.dirty) {
-            _ = try self.file.writeAll(page.id, page.buffer);
+            _ = try self.file.writeAll(page.id, page.buffer[0..]);
             page.dirty = false;
         }
     }
@@ -106,7 +107,7 @@ pub const Manager = struct {
         }
         var lru = &self.pages[leastRecentlyUsed];
         try self.writeback(lru);
-        _ = try self.file.readAll(pageID, std.mem.sliceAsBytes(lru.buffer));
+        _ = try self.file.readAll(pageID, lru.buffer[0..]);
         lru.id = pageID;
         lru.dirty = false;
         lru.live = true;

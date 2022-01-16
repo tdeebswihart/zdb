@@ -42,6 +42,7 @@ pub const Directory = struct {
         headPage.unpin();
         self.headPage = null;
         self.mem.destroy(self.latch);
+        self.* = undefined;
     }
 
     pub fn allocate(self: Self) anyerror!*Page {
@@ -142,7 +143,7 @@ pub const DirectoryPage = struct {
     const Self = @This();
 
     pub fn from(page: *Page) *Self {
-        var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer));
+        var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer[0..]));
         if (self.id != page.id) {
             // This is a new page
             self.id = page.id;

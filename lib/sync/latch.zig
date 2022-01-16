@@ -17,7 +17,7 @@ pub const Latch = struct {
         /// Holds are no longer valid after calling release.
         pub fn release(self: *@This()) void {
             _ = @atomicRmw(u64, &self.latch.holds, .Sub, self.shares, .Release);
-            self.latch = undefined;
+            self.* = undefined;
         }
     };
 

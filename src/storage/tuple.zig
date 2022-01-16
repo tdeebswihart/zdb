@@ -49,7 +49,7 @@ pub const TuplePage = struct {
     const Self = @This();
 
     pub fn init(page: *Page) Error!*Self {
-        var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer));
+        var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer[0..]));
         if (self.header.magic != MAGIC) {
             self.header.magic = MAGIC;
             self.header.remainingSpace = slotSpace;

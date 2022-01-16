@@ -157,3 +157,25 @@ test "hashtables can handle array-based keys" {
     try ht.get(buf, &results);
     try t.expectEqualSlices(u16, &[_]u16{ 1, 2 }, results.items);
 }
+
+test "hashtables can split pages" {
+    var ctx = try Test.setup(50);
+    defer ctx.teardown();
+
+    var ht = try HashTable(u16, u16).new(alloc, ctx.bm, ctx.pd);
+    defer ht.destroy() catch |e| panic("{s}", .{e});
+
+    var i: u16 = 0;
+    while (i < 1024) : (i += 1) {
+        try expect(try ht.put(i, i));
+    }
+
+    var results = std.ArrayList(u16).init(alloc);
+    defer results.deinit();
+    i = 0;
+    while (i < 1024) : (i += 1) {
+        results.clearRetainingCapacity();
+        try ht.get(i, &results);
+        try t.expectEqualSlices(u16, &[_]u16{i}, results.items);
+    }
+}

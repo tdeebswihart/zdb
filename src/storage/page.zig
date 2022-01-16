@@ -10,12 +10,10 @@ pub const LatchedPage = struct {
     pub fn deinit(self: *@This()) void {
         self.hold.release();
         self.page.unpin();
+        self.* = undefined;
     }
 };
-// Each block is of fixed length and acts as a bump-up
-// allocator for contained records.
-// A periodic compaction (or vacuum) process should clean up
-// deleted blocks so there are no gaps in the file.
+
 pub const Page = struct {
     live: bool = false,
     id: u32 = 0,
@@ -24,14 +22,14 @@ pub const Page = struct {
     dirty: bool = false,
     latch: *Latch,
     mem: std.mem.Allocator,
-    buffer: []u8 = &[_]u8{},
+    buffer: [PAGE_SIZE]u8,
 
     const Self = @This();
 
     pub fn init(self: *Self, mem: std.mem.Allocator) !void {
         self.mem = mem;
         self.latch = try Latch.init(self.mem);
-        self.buffer = try mem.alignedAlloc(u8, PAGE_SIZE, PAGE_SIZE);
+        //self.buffer = try mem.alignedAlloc(u8, PAGE_SIZE, PAGE_SIZE);
         self.live = false;
         self.pins = 0;
         self.dirty = false;
@@ -54,7 +52,8 @@ pub const Page = struct {
 
     pub fn deinit(self: *Self) !void {
         assert(!self.dirty);
-        self.mem.free(self.buffer);
+        //self.mem.free(self.buffer);
         self.mem.destroy(self.latch);
+        //self.* = undefined;
     }
 };
