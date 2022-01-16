@@ -135,3 +135,25 @@ test "hashtable values can be removed" {
     try ht.get(0, &results);
     try t.expectEqualSlices(u16, &[_]u16{2}, results.items);
 }
+
+test "hashtables can handle array-based keys" {
+    var ctx = try Test.setup(10);
+    defer ctx.teardown();
+
+    var ht = try HashTable([255:0]u8, u16).new(alloc, ctx.bm, ctx.pd);
+    defer ht.destroy() catch |e| panic("{s}", .{e});
+
+    var buf: [255:0]u8 = std.mem.zeroes([255:0]u8);
+    buf[0] = 'h';
+    buf[1] = 'e';
+    buf[2] = 'l';
+    buf[3] = 'l';
+    buf[4] = 'o';
+
+    try expect(try ht.put(buf, 1));
+    try expect(try ht.put(buf, 2));
+    var results = std.ArrayList(u16).init(alloc);
+    defer results.deinit();
+    try ht.get(buf, &results);
+    try t.expectEqualSlices(u16, &[_]u16{ 1, 2 }, results.items);
+}

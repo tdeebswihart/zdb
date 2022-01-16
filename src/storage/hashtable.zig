@@ -1,5 +1,6 @@
 const std = @import("std");
 const mem = std.mem;
+const meta = std.meta;
 const assert = std.debug.assert;
 const math = std.math;
 const Page = @import("page.zig").Page;
@@ -35,7 +36,10 @@ pub const DirectoryPage = struct {
 /// The amount of data a BucketPage can store is based on the key, value,
 /// and page sizes.
 pub fn BucketPage(comptime K: type, comptime V: type) type {
-    const Entry = struct { key: K, val: V };
+    const Entry = struct {
+        key: K,
+        val: V,
+    };
     return struct {
         pub const maxEntries = 4 * PAGE_SIZE / (4 * @sizeOf(Entry) + 1);
 
@@ -57,14 +61,18 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
             return self;
         }
 
-        pub fn get(self: *Self, i: u16) ?Entry {
+        pub fn get(self: *Self, i: u16, key: K) ?V {
             if (self.readable[i] == 0) {
                 return null;
             }
-            return self.data[i];
+            const e = &self.data[i];
+            if (meta.eql(key, e.key)) {
+                return e.val;
+            }
+            return null;
         }
 
-        pub fn insert(self: *Self, key: K, val: V, initIdx: u16) bool {
+        pub fn insert(self: *Self, initIdx: u16, key: K, val: V) bool {
             if (self.put(initIdx, key, val)) {
                 return true;
             }
@@ -92,7 +100,8 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
         }
 
         pub fn remove(self: *Self, i: u16, key: K, val: V) void {
-            if (self.data[i].key == key and self.data[i].val == val) {
+            var e = &self.data[i];
+            if (meta.eql(key, e.key) and meta.eql(val, e.val)) {
                 self.readable[i] = 0;
             }
         }
@@ -218,8 +227,8 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
 
             var b = Bucket.init(bp);
             var localIdx = self.localIndex(hsh);
-            if (b.get(@intCast(u16, localIdx))) |entry| {
-                try results.append(entry.val);
+            if (b.get(@intCast(u16, localIdx), key)) |val| {
+                try results.append(val);
             }
 
             var i = localIdx + 1;
@@ -227,8 +236,8 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
                 if (i > Bucket.maxEntries) {
                     i = 0;
                 }
-                if (b.get(@intCast(u16, i))) |entry| {
-                    try results.append(entry.val);
+                if (b.get(@intCast(u16, i), key)) |val| {
+                    try results.append(val);
                 }
             }
         }
@@ -248,7 +257,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
 
             var b = Bucket.init(bp);
             var localIdx: u16 = self.localIndex(hsh);
-            if (b.insert(key, val, localIdx)) {
+            if (b.insert(localIdx, key, val)) {
                 return true;
             }
 
@@ -303,9 +312,9 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
                     const e = b.data[i];
                     const ehsh = self.checksum(e.key);
                     if (self.prefix(ehsh) == mirrorIdx) {
-                        assert(mb.insert(e.key, e.val, self.localIndex(ehsh)));
+                        assert(mb.insert(self.localIndex(ehsh), e.key, e.val));
                     } else {
-                        assert(rb.put(e.key, e.val, self.localIndex(ehsh)));
+                        assert(rb.insert(self.localIndex(ehsh), e.key, e.val));
                     }
                 }
             }
@@ -314,7 +323,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             try self.pageDir.free(bp.id);
 
             if (idx == mirrorIdx) {
-                return mb.insert(key, val, self.localIndex(hsh));
+                return mb.insert(self.localIndex(hsh), key, val);
             } else {
                 return try self.put(key, val);
             }
