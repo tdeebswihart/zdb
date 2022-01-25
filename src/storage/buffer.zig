@@ -8,6 +8,8 @@ const ExclusivePage = @import("page.zig").ExclusivePage;
 const Latch = @import("libdb").sync.Latch;
 const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
 
+const log = std.log.scoped(.page);
+
 const PageMetadata = struct {
     // page offset = sizeof header + sizeof directory + offset into directory *
     // pagesize?
@@ -68,6 +70,7 @@ pub const Manager = struct {
         var hold = page.latch.exclusive();
         defer hold.release();
         if (page.live and page.dirty) {
+            log.debug("writeback={d}", .{page.id});
             _ = try self.file.writeAll(page.id, page.buffer[0..]);
             page.dirty = false;
         }
@@ -94,6 +97,7 @@ pub const Manager = struct {
             }
             if (page.id == pageID) {
                 page.pin();
+                log.debug("pin={d}", .{pageID});
                 return page;
             }
             if (!page.pinned() and page.lastAccess < lowestTs) {
@@ -107,10 +111,12 @@ pub const Manager = struct {
         }
         var lru = &self.pages[leastRecentlyUsed];
         try self.writeback(lru);
+        log.debug("pin={d} evicting={d}", .{ pageID, lru.id });
         _ = try self.file.readAll(pageID, lru.buffer[0..]);
         lru.id = pageID;
         lru.dirty = false;
         lru.live = true;
+        lru.pins = 0;
         lru.pin();
         return lru;
     }
@@ -121,6 +127,7 @@ pub const Manager = struct {
             .shared => page.latch.shared(),
             .exclusive => page.latch.exclusive(),
         };
+        log.debug("latch={d} kind={}", .{ pageID, kind });
         return LatchedPage{
             .page = page,
             .hold = hold,

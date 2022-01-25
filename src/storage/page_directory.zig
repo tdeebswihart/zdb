@@ -6,6 +6,8 @@ const buffer = @import("buffer.zig");
 const Page = @import("page.zig").Page;
 const LatchedPage = @import("page.zig").LatchedPage;
 
+const log = std.log.scoped(.page_directory);
+
 pub const Error = error{
     WrongDirectory,
     Invalid,
@@ -75,6 +77,7 @@ pub const Directory = struct {
         if (dir != self.head) {
             page.unpin();
         }
+        log.debug("allocated={d} directory={d}", .{ pageID, dir.id });
         return try self.bufmgr.pin(pageID);
     }
 
@@ -84,6 +87,7 @@ pub const Directory = struct {
             .shared => page.latch.shared(),
             .exclusive => page.latch.exclusive(),
         };
+        log.debug("latched={d} kind={}", .{ page.id, kind });
         return LatchedPage{
             .page = page,
             .hold = hold,
@@ -126,6 +130,7 @@ pub const Directory = struct {
         if (dir != self.head) {
             dirPage.unpin();
         }
+        log.debug("freed={d} directory={d}", .{ pageID, dirPage.id });
     }
 };
 

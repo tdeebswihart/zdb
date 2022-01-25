@@ -166,6 +166,7 @@ test "hashtables can split pages" {
     defer ht.destroy() catch |e| panic("{s}", .{e});
 
     var i: u16 = 0;
+    // We start with 2 pages of 512.
     while (i < 1024) : (i += 1) {
         try expect(try ht.put(i, i));
     }

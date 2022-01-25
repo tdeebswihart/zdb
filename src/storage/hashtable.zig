@@ -10,6 +10,8 @@ const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
 const BufferManager = @import("buffer.zig").Manager;
 const PageDirectory = @import("page_directory.zig").Directory;
 
+const log = std.log.scoped(.hashtable);
+
 pub const DirectoryPage = struct {
     pageID: u32,
     lsn: u32,
@@ -127,11 +129,13 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
 
         const Self = @This();
 
-        pub fn new(alloc: std.mem.Allocator, bm: *BufferManager, pageDir: PageDirectory) !Self {
-            var ht = try Self.init(alloc, bm, pageDir, try pageDir.allocate());
+        pub fn new(alloc: std.mem.Allocator, bm: *BufferManager, pageDir: PageDirectory) !*Self {
+            const ht = try Self.init(alloc, bm, pageDir, try pageDir.allocate());
             errdefer ht.destroy() catch |e| {
                 std.debug.panic("failed to destroy hashtable: {?}", .{e});
             };
+
+            log.debug("new={*}", .{ht});
 
             const dir = ht.directory;
             var dirhold = ht.dirPage.latch.exclusive();
@@ -158,22 +162,23 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             return ht;
         }
 
-        pub fn init(alloc: std.mem.Allocator, bm: *BufferManager, pageDir: PageDirectory, dirPage: *Page) !Self {
-            return Self{
-                .seed = 0,
-                .dirPage = dirPage,
-                .directory = DirectoryPage.init(dirPage),
-                .bm = bm,
-                .pageDir = pageDir,
-                .latch = try Latch.init(alloc),
-                .mem = alloc,
-            };
+        pub fn init(alloc: std.mem.Allocator, bm: *BufferManager, pageDir: PageDirectory, dirPage: *Page) !*Self {
+            const ht = try alloc.create(Self);
+            ht.seed = 0;
+            ht.dirPage = dirPage;
+            ht.directory = DirectoryPage.init(dirPage);
+            ht.bm = bm;
+            ht.pageDir = pageDir;
+            ht.latch = try Latch.init(alloc);
+            ht.mem = alloc;
+            return ht;
         }
 
         /// Destroy this hashtable. Do not call alongside deinit
         pub fn destroy(self: *Self) !void {
             var h = self.latch.exclusive();
             errdefer h.release();
+            log.debug("free", .{});
             const pages = @as(u32, 2) << @intCast(u5, self.directory.globalDepth - 1);
             var idx: u16 = 0;
             while (idx < pages) : (idx += 1) {
@@ -222,12 +227,10 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             var hold = self.latch.shared();
             defer hold.release();
 
-            const bp = try self.bm.pin(self.directory.bucketPageIDs[pfx]);
-            defer bp.unpin();
-            var bh = bp.latch.shared();
-            defer bh.release();
+            var bh = try self.bm.pinLatched(self.directory.bucketPageIDs[pfx], .shared);
+            defer bh.deinit();
 
-            var b = Bucket.init(bp);
+            var b = Bucket.init(bh.page);
             var localIdx = self.localIndex(hsh);
             if (b.get(@intCast(u16, localIdx), key)) |val| {
                 try results.append(val);
@@ -252,12 +255,10 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             defer hold.release();
 
             const d = self.directory;
-            const bp = try self.bm.pin(d.bucketPageIDs[idx]);
-            defer bp.unpin();
-            var bh = bp.latch.exclusive();
-            defer bh.release();
+            var bh = try self.bm.pinLatched(d.bucketPageIDs[idx], .exclusive);
+            defer bh.deinit();
 
-            var b = Bucket.init(bp);
+            var b = Bucket.init(bh.page);
             var localIdx: u16 = self.localIndex(hsh);
             if (b.insert(localIdx, key, val)) {
                 return true;
@@ -322,7 +323,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             }
 
             // We're splitting so are replacing this page
-            try self.pageDir.free(bp.id);
+            try self.pageDir.free(bh.page.id);
 
             if (idx == mirrorIdx) {
                 return mb.insert(self.localIndex(hsh), key, val);

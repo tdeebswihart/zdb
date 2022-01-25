@@ -2,6 +2,8 @@ const std = @import("std");
 const storage = @import("storage.zig");
 const tuple = storage.tuple;
 
+const log = std.log.scoped(.zdb);
+
 fn openFile(fpath: []const u8) !std.fs.File {
     const cwd = std.fs.cwd();
     return cwd.openFile(fpath, .{ .read = true, .write = true }) catch |err| switch (err) {
@@ -11,12 +13,11 @@ fn openFile(fpath: []const u8) !std.fs.File {
 }
 
 pub fn main() !void {
-    const stderr = std.io.getStdErr();
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer {
         const leaked = gpa.deinit();
-        if (leaked) stderr.writeAll("leaked memory\n") catch @panic("failed to write to stderr");
+        if (leaked) log.err("leaked memory", .{});
     }
     const dbfile = try openFile("init.zdb");
     var fs = try storage.File.init(allocator, dbfile);
@@ -25,30 +26,37 @@ pub fn main() !void {
     const bm = try storage.BufferManager.init(fs.manager(), 50, allocator);
     defer {
         bm.deinit() catch |err| {
-            std.debug.print("failed to deinit manager: {any}\n", .{err});
+            log.err("failed to deinit manager: {any}\n", .{err});
         };
     }
 
     var pageDir = try storage.PageDirectory.init(allocator, bm);
     defer pageDir.deinit();
 
-    var pin = try pageDir.allocate();
-    defer pin.unpin();
-    var sharedPage = try tuple.Readable.init(pin);
-
-    const b1: []const u8 = &[_]u8{ 0x41, 0x42, 0x43 };
-    const bytes = sharedPage.get(0) catch {
-        sharedPage.deinit();
-        var xPage = try tuple.Writable.init(pin);
-        defer xPage.deinit();
-        const e2 = try xPage.put(b1);
-        std.debug.print("wrote {any} to ({d},{d})\n", .{ e2, e2.page, e2.slot });
-        return;
-    };
-    if (!std.mem.eql(u8, bytes, b1)) {
-        std.debug.print("read {any} but expected {any}\n", .{ bytes, b1 });
-    } else {
-        std.debug.print("read {any}\n", .{bytes});
+    var ht = try storage.HashTable(u16, u16).new(allocator, bm, pageDir);
+    defer {
+        ht.destroy() catch |err| {
+            log.err("failed to destroy hash table: {any}", .{err});
+        };
     }
-    sharedPage.deinit();
+
+    var i: u16 = 0;
+    // We start with 2 pages of 512.
+    while (i < 1024) : (i += 1) {
+        if (!try ht.put(i, i)) {
+            log.err("put={d} failed=true", .{i});
+        }
+    }
+
+    var results = std.ArrayList(u16).init(allocator);
+    defer results.deinit();
+    i = 0;
+    while (i < 1024) : (i += 1) {
+        results.clearRetainingCapacity();
+        try ht.get(i, &results);
+        const expected = &[_]u16{i};
+        if (!std.mem.eql(u16, expected, results.items)) {
+            log.err("i={d} expected={any} got={any}", .{ i, expected, results.items });
+        }
+    }
 }

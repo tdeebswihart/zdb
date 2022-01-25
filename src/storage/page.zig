@@ -3,12 +3,16 @@ const Latch = @import("libdb").sync.Latch;
 const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
 const assert = std.debug.assert;
 
+const log = std.log.scoped(.page);
+
 pub const LatchedPage = struct {
     page: *Page,
     hold: Latch.Hold,
 
     pub fn deinit(self: *@This()) void {
+        log.debug("release={d}", .{self.page.id});
         self.hold.release();
+        log.debug("unpin={d}", .{self.page.id});
         self.page.unpin();
         self.* = undefined;
     }
@@ -52,8 +56,7 @@ pub const Page = struct {
 
     pub fn deinit(self: *Self) !void {
         assert(!self.dirty);
-        //self.mem.free(self.buffer);
         self.mem.destroy(self.latch);
-        //self.* = undefined;
+        self.* = undefined;
     }
 };
