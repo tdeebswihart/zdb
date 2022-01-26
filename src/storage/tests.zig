@@ -95,6 +95,29 @@ test "tuple pages can be written to" {
     page.unpin();
 }
 
+// *** Page Directory ***
+test "page directories can allocate and free pages" {
+    var ctx = try Test.setup(5);
+    defer ctx.teardown();
+    var p1 = try ctx.pd.allocLatched(.exclusive);
+    const pageID = p1.page.id;
+    p1.deinit();
+    try ctx.pd.free(pageID);
+
+    // We should get the same page back
+    var p2 = try ctx.pd.allocLatched(.exclusive);
+    try t.expectEqual(pageID, p2.page.id);
+    const p2ID = p2.page.id;
+    p2.deinit();
+    try ctx.pd.free(p2ID);
+}
+
+test "page directories will add directory pages as needed" {
+    // FIXME allocate more than PAGE_SIZE - 16 pages
+    var ctx = try Test.setup(5);
+    defer ctx.teardown();
+}
+
 // *** Hash Table ***
 const HashTable = @import("hashtable.zig").HashTable;
 test "new hash tables can be created" {

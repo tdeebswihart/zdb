@@ -30,10 +30,27 @@ pub fn main() !void {
         };
     }
 
-    var pageDir = try storage.PageDirectory.init(allocator, bm);
-    defer pageDir.deinit();
+    var pd = try storage.PageDirectory.init(allocator, bm);
+    defer pd.deinit();
 
-    var ht = try storage.HashTable(u16, u16).new(allocator, bm, pageDir);
+    var p1 = try pd.allocLatched(.exclusive);
+    const pageID = p1.page.id;
+    p1.deinit();
+    try pd.free(pageID);
+
+    // We should get the same page back
+    var p2 = try pd.allocLatched(.exclusive);
+    if (pageID != p2.page.id) {
+        log.err("expected={d} got={d}", .{ pageID, p2.page.id });
+        return;
+    }
+    const p2ID = p2.page.id;
+    p2.deinit();
+    log.info("deinit p2", .{});
+    try pd.free(p2ID);
+    log.info("hashtable time", .{});
+
+    var ht = try storage.HashTable(u16, u16).new(allocator, bm, pd);
     defer {
         ht.destroy() catch |err| {
             log.err("failed to destroy hash table: {any}", .{err});

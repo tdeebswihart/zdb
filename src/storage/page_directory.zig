@@ -130,41 +130,45 @@ pub const Directory = struct {
         if (dir != self.head) {
             dirPage.unpin();
         }
-        log.debug("freed={d} directory={d}", .{ pageID, dirPage.id });
+        log.debug("directory={d} freed={d}", .{ pageID, dirPage.id });
     }
 };
 
 // page_size - directory overhead
-const nPages = (PAGE_SIZE - 16);
-
+const nPages = (PAGE_SIZE - @sizeOf(u32) * 3);
+const dirMagic = 0xC45C4DE;
 /// A single page of the directory.
 /// The page directory is composed of a linked list of DirectoryPage structures
 pub const DirectoryPage = struct {
     // The number of pages a directoryPage can manage
     id: u32,
     next: u32,
+    magic: u32,
     freePages: [nPages]u1,
 
     const Self = @This();
 
     pub fn from(page: *Page) *Self {
         var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer[0..]));
-        if (self.id != page.id) {
+        if (self.magic != dirMagic) {
             // This is a new page
             self.id = page.id;
+            self.magic = dirMagic;
             self.next = page.id + nPages;
             // Fuck it. I'll use u64s and bit math some other time
             for (self.freePages) |_, idx| {
                 self.freePages[idx] = 1;
             }
             page.dirty = true;
+        } else if (self.id != page.id) {
+            @panic("corrupt directory page");
         }
         return self;
     }
 
     pub fn full(self: *Self) bool {
         for (self.freePages) |v| {
-            if (v > 0) {
+            if (v == 1) {
                 return false;
             }
         }
@@ -176,6 +180,7 @@ pub const DirectoryPage = struct {
             if (available == 1) {
                 const pageID: u32 = self.id + @intCast(u32, idx) + 1;
                 self.freePages[idx] = 0;
+                log.debug("directory={d} allocated={d} offset={d}", .{ self.id, pageID, idx });
                 return pageID;
             }
         }
@@ -183,7 +188,8 @@ pub const DirectoryPage = struct {
     }
 
     pub fn free(self: *Self, pageID: u64) void {
-        const offset = pageID - self.id;
+        const offset = pageID - self.id - 1;
+        log.debug("directory={d} freed={d} offset={d}", .{ self.id, pageID, offset });
         self.freePages[offset] = 1;
     }
 };

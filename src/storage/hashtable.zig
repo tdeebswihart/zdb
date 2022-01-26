@@ -195,6 +195,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             self.pageDir = undefined;
             h.release();
             self.mem.destroy(self.latch);
+            self.mem.destroy(self);
         }
 
         pub fn deinit(self: *Self) void {
