@@ -6,7 +6,7 @@ const buffer = @import("buffer.zig");
 const Page = @import("page.zig").Page;
 const LatchedPage = @import("page.zig").LatchedPage;
 
-const log = std.log.scoped(.page_directory);
+const log = std.log.scoped(.pd);
 
 pub const Error = error{
     WrongDirectory,
@@ -16,38 +16,35 @@ pub const Error = error{
 pub const Directory = struct {
     headPage: ?*Page,
     head: *DirectoryPage,
-    latch: *Latch,
+    latch: Latch,
     mem: std.mem.Allocator,
     bufmgr: *buffer.Manager,
 
     const Self = @This();
 
-    pub fn init(mem: std.mem.Allocator, bufmgr: *buffer.Manager) !Self {
+    pub fn init(mem: std.mem.Allocator, bufmgr: *buffer.Manager) !*Self {
+        var dir: *Self = try mem.create(Self);
         var headPage = try bufmgr.pin(0);
-        var dir = Directory{
-            .headPage = headPage,
-            .head = DirectoryPage.from(headPage),
-            .latch = try Latch.init(mem),
-            .mem = mem,
-            .bufmgr = bufmgr,
-        };
+        dir.headPage = headPage;
+        dir.head = DirectoryPage.from(headPage);
+        dir.mem = mem;
+        dir.bufmgr = bufmgr;
+        dir.latch = .{};
         return dir;
     }
 
     pub fn deinit(self: *Self) void {
-        var hold = self.latch.exclusive();
-        defer hold.release();
+        _ = self.latch.exclusive();
         var headPage = self.headPage orelse {
             return;
         };
 
         headPage.unpin();
         self.headPage = null;
-        self.mem.destroy(self.latch);
-        self.* = undefined;
+        self.mem.destroy(self);
     }
 
-    pub fn allocate(self: Self) anyerror!*Page {
+    pub fn allocate(self: *Self) anyerror!*Page {
         var hold = self.latch.shared();
         defer hold.release();
         var page = self.headPage orelse {
@@ -81,7 +78,7 @@ pub const Directory = struct {
         return try self.bufmgr.pin(pageID);
     }
 
-    pub fn allocLatched(self: Self, kind: Latch.Kind) anyerror!LatchedPage {
+    pub fn allocLatched(self: *Self, kind: Latch.Kind) anyerror!LatchedPage {
         const page = try self.allocate();
         var hold = switch (kind) {
             .shared => page.latch.shared(),
@@ -94,7 +91,7 @@ pub const Directory = struct {
         };
     }
 
-    pub fn free(self: Self, pageID: u32) !void {
+    pub fn free(self: *Self, pageID: u32) !void {
         var hold = self.latch.shared();
         defer hold.release();
         var dirPage = self.headPage orelse {

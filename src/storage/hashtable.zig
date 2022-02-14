@@ -54,14 +54,16 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
         data: [maxEntries]Entry,
         const Self = @This();
 
-        pub fn init(page: *Page) *Self {
+        pub fn new(page: *Page) *Self {
             var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer[0..]));
-            if (self.pageID != page.id) {
-                for (self.occupied) |*b| b.* = 0;
-                for (self.readable) |*b| b.* = 0;
-                self.pageID = page.id;
-            }
+            for (self.occupied) |*b| b.* = 0;
+            for (self.readable) |*b| b.* = 0;
+            self.pageID = page.id;
             return self;
+        }
+
+        pub fn init(page: *Page) *Self {
+            return @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer[0..]));
         }
 
         pub fn get(self: *Self, i: u16, key: K) ?V {
@@ -123,19 +125,17 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
         dirPage: *Page,
         directory: *DirectoryPage,
         bm: *BufferManager,
-        pageDir: PageDirectory,
-        latch: *Latch,
+        pageDir: *PageDirectory,
+        latch: Latch = .{},
         mem: std.mem.Allocator,
 
         const Self = @This();
 
-        pub fn new(alloc: std.mem.Allocator, bm: *BufferManager, pageDir: PageDirectory) !*Self {
+        pub fn new(alloc: std.mem.Allocator, bm: *BufferManager, pageDir: *PageDirectory) !*Self {
             const ht = try Self.init(alloc, bm, pageDir, try pageDir.allocate());
             errdefer ht.destroy() catch |e| {
                 std.debug.panic("failed to destroy hashtable: {?}", .{e});
             };
-
-            log.debug("new={*}", .{ht});
 
             const dir = ht.directory;
             var dirhold = ht.dirPage.latch.exclusive();
@@ -143,11 +143,11 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
 
             var b1 = try pageDir.allocLatched(.exclusive);
             defer b1.deinit();
-            _ = Bucket.init(b1.page);
+            _ = Bucket.new(b1.page);
 
             var b2 = try pageDir.allocLatched(.exclusive);
             defer b2.deinit();
-            _ = Bucket.init(b2.page);
+            _ = Bucket.new(b2.page);
 
             dir.globalDepth = 1;
             // set up our first two buckets
@@ -159,17 +159,19 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             b1.page.dirty = true;
             b2.page.dirty = true;
             ht.dirPage.dirty = true;
+
+            log.debug("new={*}", .{ht});
             return ht;
         }
 
-        pub fn init(alloc: std.mem.Allocator, bm: *BufferManager, pageDir: PageDirectory, dirPage: *Page) !*Self {
+        pub fn init(alloc: std.mem.Allocator, bm: *BufferManager, pageDir: *PageDirectory, dirPage: *Page) !*Self {
             const ht = try alloc.create(Self);
             ht.seed = 0;
             ht.dirPage = dirPage;
+            ht.latch = .{};
             ht.directory = DirectoryPage.init(dirPage);
             ht.bm = bm;
             ht.pageDir = pageDir;
-            ht.latch = try Latch.init(alloc);
             ht.mem = alloc;
             return ht;
         }
@@ -194,7 +196,6 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             self.directory = undefined;
             self.pageDir = undefined;
             h.release();
-            self.mem.destroy(self.latch);
             self.mem.destroy(self);
         }
 
@@ -204,7 +205,6 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             self.dirPage = undefined;
             self.directory = undefined;
             h.release();
-            self.mem.destroy(self.latch);
             self.* = undefined;
         }
 
@@ -222,7 +222,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             return @intCast(u16, 0xFFFF & (hsh >> @intCast(u6, self.directory.globalDepth))) % Bucket.maxEntries;
         }
 
-        pub fn get(self: Self, key: K, results: *ArrayList) !void {
+        pub fn get(self: *Self, key: K, results: *ArrayList) !void {
             const hsh = self.checksum(key);
             const pfx = self.prefix(hsh);
             var hold = self.latch.shared();
@@ -248,7 +248,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             }
         }
 
-        pub fn put(self: Self, key: K, val: V) anyerror!bool {
+        pub fn put(self: *Self, key: K, val: V) anyerror!bool {
             const hsh = self.checksum(key);
             var idx = self.prefix(hsh);
 
@@ -267,12 +267,12 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
 
             var mirror = try self.pageDir.allocLatched(.exclusive);
             defer mirror.deinit();
-            var mb = Bucket.init(mirror.page);
+            var mb = Bucket.new(mirror.page);
 
             // Replace self.
             var replacement = try self.pageDir.allocLatched(.exclusive);
             defer replacement.deinit();
-            var rb = Bucket.init(replacement.page);
+            var rb = Bucket.new(replacement.page);
 
             d.localDepths[idx] += 1;
             const newIdx = idx << 1;
@@ -334,7 +334,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
         }
 
         /// FIXME: merge pages if their load is below a certain amount
-        pub fn remove(self: Self, key: K, val: V) anyerror!void {
+        pub fn remove(self: *Self, key: K, val: V) anyerror!void {
             const hsh = self.checksum(key);
             const pfx = self.prefix(hsh);
             var hold = self.latch.shared();

@@ -16,15 +16,13 @@ pub const Latch = struct {
 
         /// Holds are no longer valid after calling release.
         pub fn release(self: *@This()) void {
-            _ = @atomicRmw(u64, &self.latch.holds, .Sub, self.shares, .Release);
+            _ = @atomicRmw(State, &self.latch.holds, .Sub, self.shares, .Release);
             self.* = undefined;
         }
     };
 
-    pub fn init(mem: std.mem.Allocator) !*Self {
-        var l = try mem.create(Self);
-        l.holds = 0;
-        return l;
+    pub inline fn deinit(self: *Self, mem: std.mem.Allocator) void {
+        mem.destroy(self);
     }
 
     pub fn shared(self: *Self) Hold {
@@ -61,12 +59,10 @@ pub const Latch = struct {
 };
 
 const Thread = std.Thread;
-const testAllocator = std.testing.allocator;
 const expectEqual = std.testing.expectEqual;
 
 test "latches can be share locked and unlocked" {
-    var latch = try Latch.init(testAllocator);
-    defer testAllocator.destroy(latch);
+    var latch = .{};
 
     var hold = latch.shared();
     try expectEqual(latch.holds, 1);
@@ -75,8 +71,7 @@ test "latches can be share locked and unlocked" {
 }
 
 test "latches can be exclusively locked and unlocked" {
-    var latch = try Latch.init(testAllocator);
-    defer testAllocator.destroy(latch);
+    var latch = .{};
 
     var hold = latch.exclusive();
     try expectEqual(latch.holds, maxInt(State));

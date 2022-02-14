@@ -10,17 +10,18 @@ const alloc = t.allocator;
 const panic = std.debug.panic;
 const expect = t.expect;
 
+var rand = std.rand.DefaultPrng.init(42);
+const prng = rand.random();
+
 pub const Test = struct {
     runid: usize,
     path: []const u8,
-    rng: std.rand.Random,
     fs: *File,
     mgr: FileManager,
     bm: *BufferManager,
-    pd: PageDirectory,
+    pd: *PageDirectory,
 
     pub fn setup(nPages: usize) !@This() {
-        var prng = std.rand.DefaultPrng.init(0).random();
         const id = prng.int(usize);
         const path = try allocPrint(alloc, "/tmp/{d}.zdb", .{id});
         const f = try std.fs.createFileAbsolute(path, .{
@@ -36,7 +37,7 @@ pub const Test = struct {
         errdefer mgr.deinit();
         const bm = try BufferManager.init(mgr, nPages, alloc);
         var pd = try PageDirectory.init(alloc, bm);
-        return @This(){ .runid = id, .path = path, .rng = prng, .fs = fs, .mgr = mgr, .bm = bm, .pd = pd };
+        return @This(){ .runid = id, .path = path, .fs = fs, .mgr = mgr, .bm = bm, .pd = pd };
     }
 
     pub fn teardownKeepData(self: *@This()) !void {
@@ -58,7 +59,7 @@ pub const Test = struct {
     }
 };
 
-// *** Paging ***
+// *** Buffer management ***
 test "pinned pages are not evicted when space is needed" {
     var ctx = try Test.setup(1);
     defer ctx.teardown();
@@ -78,6 +79,18 @@ test "unpinned pages are evicted when space is needed" {
     page.unpin();
 }
 
+test "pin and unpin many pages" {
+    var ctx = try Test.setup(10);
+    defer ctx.teardown();
+
+    var i: u32 = 0;
+    while (i < 256) : (i += 1) {
+        var page = try ctx.bm.pin(i);
+        page.unpin();
+    }
+}
+
+// *** Tuple pages ***
 test "tuple pages can be written to" {
     var ctx = try Test.setup(5);
     defer ctx.teardown();

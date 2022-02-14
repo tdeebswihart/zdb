@@ -8,7 +8,7 @@ const ExclusivePage = @import("page.zig").ExclusivePage;
 const Latch = @import("libdb").sync.Latch;
 const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
 
-const log = std.log.scoped(.page);
+const log = std.log.scoped(.bm);
 
 const PageMetadata = struct {
     // page offset = sizeof header + sizeof directory + offset into directory *
@@ -28,7 +28,7 @@ pub const Manager = struct {
     pages: []Page,
     buffer: []u8,
     op: u64 = 0,
-    latch: *Latch,
+    latch: Latch = .{},
 
     const Self = @This();
 
@@ -47,7 +47,7 @@ pub const Manager = struct {
         mgr.file = file;
         mgr.mem = mem;
         mgr.pages = pages;
-        mgr.latch = try Latch.init(mem);
+        mgr.latch = .{};
 
         return mgr;
     }
@@ -61,13 +61,12 @@ pub const Manager = struct {
             try page.deinit();
         }
         self.mem.free(self.pages);
-        self.mem.destroy(self.latch);
         self.mem.destroy(self);
-        //self.* = undefined;
     }
 
     fn writeback(self: *Self, page: *Page) !void {
-        var hold = page.latch.exclusive();
+        // allow reads while we write a page back
+        var hold = page.latch.shared();
         defer hold.release();
         if (page.live and page.dirty) {
             log.debug("writeback={d}", .{page.id});
@@ -86,6 +85,7 @@ pub const Manager = struct {
         // The current solution is to xlock the manager while we pin
         // and use that to serialize the loading and unloading of
         // pages that have spilled to disk
+        log.debug("pinning {d}", .{pageID});
         var hold = self.latch.exclusive();
         defer hold.release();
         while (i < self.pages.len) : (i += 1) {
@@ -97,7 +97,7 @@ pub const Manager = struct {
             }
             if (page.id == pageID) {
                 page.pin();
-                log.debug("pin={d}", .{pageID});
+                log.debug("pin={d} pins={d}", .{ pageID, page.pins });
                 return page;
             }
             if (!page.pinned() and page.lastAccess < lowestTs) {
@@ -112,7 +112,7 @@ pub const Manager = struct {
         var lru = &self.pages[leastRecentlyUsed];
         try self.writeback(lru);
         log.debug("pin={d} evicting={d}", .{ pageID, lru.id });
-        _ = try self.file.readAll(pageID, lru.buffer[0..]);
+        _ = try self.file.readAll(pageID, lru.buffer[0..lru.buffer.len]);
         lru.id = pageID;
         lru.dirty = false;
         lru.live = true;
