@@ -30,25 +30,22 @@ pub fn main() !void {
         };
     }
 
-    var pd = try storage.PageDirectory.init(allocator, bm);
-    defer pd.deinit();
-
-    var p1 = try pd.allocLatched(.exclusive);
+    var p1 = try bm.allocLatched(.exclusive);
     const pageID = p1.page.id;
     p1.deinit();
-    try pd.free(pageID);
+    try bm.free(pageID);
 
     // We should get the same page back
-    var p2 = try pd.allocLatched(.exclusive);
+    var p2 = try bm.allocLatched(.exclusive);
     if (pageID != p2.page.id) {
         logr.err("expected={d} got={d}", .{ pageID, p2.page.id });
         return;
     }
     const p2ID = p2.page.id;
     p2.deinit();
-    try pd.free(p2ID);
+    try bm.free(p2ID);
 
-    var ht = try storage.HashTable(u16, u16).new(allocator, bm, pd);
+    var ht = try storage.HashTable(u16, u16).new(allocator, bm);
     defer {
         ht.destroy() catch |err| {
             logr.err("failed to destroy hash table: {any}", .{err});
@@ -88,7 +85,7 @@ pub fn log(
     // .my_project, .nice_library and .default
     const scope_prefix = switch (scope) {
         .hashtable, .page => @tagName(scope),
-        .pd, .bm => @tagName(scope),
+        .bm => @tagName(scope),
         else => if (@enumToInt(level) <= @enumToInt(std.log.Level.err))
             @tagName(scope)
         else

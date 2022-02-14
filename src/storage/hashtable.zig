@@ -125,14 +125,13 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
         dirPage: *Page,
         directory: *DirectoryPage,
         bm: *BufferManager,
-        pageDir: *PageDirectory,
         latch: Latch = .{},
         mem: std.mem.Allocator,
 
         const Self = @This();
 
-        pub fn new(alloc: std.mem.Allocator, bm: *BufferManager, pageDir: *PageDirectory) !*Self {
-            const ht = try Self.init(alloc, bm, pageDir, try pageDir.allocate());
+        pub fn new(alloc: std.mem.Allocator, bm: *BufferManager) !*Self {
+            const ht = try Self.init(alloc, bm, try bm.allocate());
             errdefer ht.destroy() catch |e| {
                 std.debug.panic("failed to destroy hashtable: {?}", .{e});
             };
@@ -141,11 +140,11 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             var dirhold = ht.dirPage.latch.exclusive();
             defer dirhold.release();
 
-            var b1 = try pageDir.allocLatched(.exclusive);
+            var b1 = try bm.allocLatched(.exclusive);
             defer b1.deinit();
             _ = Bucket.new(b1.page);
 
-            var b2 = try pageDir.allocLatched(.exclusive);
+            var b2 = try bm.allocLatched(.exclusive);
             defer b2.deinit();
             _ = Bucket.new(b2.page);
 
@@ -160,18 +159,17 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             b2.page.dirty = true;
             ht.dirPage.dirty = true;
 
-            log.debug("new={*}", .{ht});
             return ht;
         }
 
-        pub fn init(alloc: std.mem.Allocator, bm: *BufferManager, pageDir: *PageDirectory, dirPage: *Page) !*Self {
+        pub fn init(alloc: std.mem.Allocator, bm: *BufferManager, dirPage: *Page) !*Self {
             const ht = try alloc.create(Self);
             ht.seed = 0;
             ht.dirPage = dirPage;
             ht.latch = .{};
             ht.directory = DirectoryPage.init(dirPage);
             ht.bm = bm;
-            ht.pageDir = pageDir;
+            ht.bm = bm;
             ht.mem = alloc;
             return ht;
         }
@@ -180,7 +178,6 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
         pub fn destroy(self: *Self) !void {
             var h = self.latch.exclusive();
             errdefer h.release();
-            log.debug("free", .{});
             const pages = @as(u32, 2) << @intCast(u5, self.directory.globalDepth - 1);
             var idx: u16 = 0;
             while (idx < pages) : (idx += 1) {
@@ -188,13 +185,13 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
                     // this should not occur
                     break;
                 }
-                try self.pageDir.free(self.directory.bucketPageIDs[idx]);
+                try self.bm.free(self.directory.bucketPageIDs[idx]);
             }
-            try self.pageDir.free(self.dirPage.id);
+            try self.bm.free(self.dirPage.id);
             self.dirPage.unpin();
             self.dirPage = undefined;
             self.directory = undefined;
-            self.pageDir = undefined;
+            self.bm = undefined;
             h.release();
             self.mem.destroy(self);
         }
@@ -265,12 +262,12 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
                 return true;
             }
 
-            var mirror = try self.pageDir.allocLatched(.exclusive);
+            var mirror = try self.bm.allocLatched(.exclusive);
             defer mirror.deinit();
             var mb = Bucket.new(mirror.page);
 
             // Replace self.
-            var replacement = try self.pageDir.allocLatched(.exclusive);
+            var replacement = try self.bm.allocLatched(.exclusive);
             defer replacement.deinit();
             var rb = Bucket.new(replacement.page);
 
@@ -324,7 +321,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             }
 
             // We're splitting so are replacing this page
-            try self.pageDir.free(bh.page.id);
+            try self.bm.free(bh.page.id);
 
             if (idx == mirrorIdx) {
                 return mb.insert(self.localIndex(hsh), key, val);

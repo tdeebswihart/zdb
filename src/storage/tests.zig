@@ -3,7 +3,6 @@ const t = std.testing;
 const BufferManager = @import("buffer.zig").Manager;
 const tuple = @import("tuple.zig");
 const FileManager = @import("file.zig").Manager;
-const PageDirectory = @import("page_directory.zig").Directory;
 const File = @import("file.zig").File;
 const allocPrint = std.fmt.allocPrint;
 const alloc = t.allocator;
@@ -19,7 +18,6 @@ pub const Test = struct {
     fs: *File,
     mgr: FileManager,
     bm: *BufferManager,
-    pd: *PageDirectory,
 
     pub fn setup(nPages: usize) !@This() {
         const id = prng.int(usize);
@@ -36,19 +34,17 @@ pub const Test = struct {
         var mgr = fs.manager();
         errdefer mgr.deinit();
         const bm = try BufferManager.init(mgr, nPages, alloc);
-        var pd = try PageDirectory.init(alloc, bm);
-        return @This(){ .runid = id, .path = path, .fs = fs, .mgr = mgr, .bm = bm, .pd = pd };
+        return @This(){ .runid = id, .path = path, .fs = fs, .mgr = mgr, .bm = bm };
     }
 
-    pub fn teardownKeepData(self: *@This()) !void {
+    pub fn teardownKeebmata(self: *@This()) !void {
         defer self.mgr.deinit();
-        self.pd.deinit();
         try self.bm.deinit();
     }
 
     pub fn teardown(self: *@This()) void {
         defer alloc.free(self.path);
-        const err = self.teardownKeepData();
+        const err = self.teardownKeebmata();
         const err2 = std.fs.deleteFileAbsolute(self.path);
         err catch |e| {
             panic("failed to tear down: {s}", .{e});
@@ -112,17 +108,17 @@ test "tuple pages can be written to" {
 test "page directories can allocate and free pages" {
     var ctx = try Test.setup(5);
     defer ctx.teardown();
-    var p1 = try ctx.pd.allocLatched(.exclusive);
+    var p1 = try ctx.bm.allocLatched(.exclusive);
     const pageID = p1.page.id;
     p1.deinit();
-    try ctx.pd.free(pageID);
+    try ctx.bm.free(pageID);
 
     // We should get the same page back
-    var p2 = try ctx.pd.allocLatched(.exclusive);
+    var p2 = try ctx.bm.allocLatched(.exclusive);
     try t.expectEqual(pageID, p2.page.id);
     const p2ID = p2.page.id;
     p2.deinit();
-    try ctx.pd.free(p2ID);
+    try ctx.bm.free(p2ID);
 }
 
 test "page directories will add directory pages as needed" {
@@ -137,7 +133,7 @@ test "new hash tables can be created" {
     var ctx = try Test.setup(10);
     defer ctx.teardown();
 
-    var ht = try HashTable(u16, u16).new(alloc, ctx.bm, ctx.pd);
+    var ht = try HashTable(u16, u16).new(alloc, ctx.bm);
     try ht.destroy();
 }
 
@@ -145,7 +141,7 @@ test "hashtables can store and retrieve values" {
     var ctx = try Test.setup(10);
     defer ctx.teardown();
 
-    var ht = try HashTable(u16, u16).new(alloc, ctx.bm, ctx.pd);
+    var ht = try HashTable(u16, u16).new(alloc, ctx.bm);
     defer ht.destroy() catch |e| panic("{s}", .{e});
 
     try expect(try ht.put(0, 1));
@@ -160,7 +156,7 @@ test "hashtable values can be removed" {
     var ctx = try Test.setup(10);
     defer ctx.teardown();
 
-    var ht = try HashTable(u16, u16).new(alloc, ctx.bm, ctx.pd);
+    var ht = try HashTable(u16, u16).new(alloc, ctx.bm);
     defer ht.destroy() catch |e| panic("{s}", .{e});
 
     try expect(try ht.put(0, 1));
@@ -176,7 +172,7 @@ test "hashtables can handle array-based keys" {
     var ctx = try Test.setup(10);
     defer ctx.teardown();
 
-    var ht = try HashTable([255:0]u8, u16).new(alloc, ctx.bm, ctx.pd);
+    var ht = try HashTable([255:0]u8, u16).new(alloc, ctx.bm);
     defer ht.destroy() catch |e| panic("{s}", .{e});
 
     var buf: [255:0]u8 = std.mem.zeroes([255:0]u8);
@@ -195,10 +191,10 @@ test "hashtables can handle array-based keys" {
 }
 
 test "hashtables can split pages" {
-    var ctx = try Test.setup(50);
+    var ctx = try Test.setup(100);
     defer ctx.teardown();
 
-    var ht = try HashTable(u16, u16).new(alloc, ctx.bm, ctx.pd);
+    var ht = try HashTable(u16, u16).new(alloc, ctx.bm);
     defer ht.destroy() catch |e| panic("{s}", .{e});
 
     var i: u16 = 0;

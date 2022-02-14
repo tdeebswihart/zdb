@@ -10,10 +10,8 @@ pub const LatchedPage = struct {
     hold: Latch.Hold,
 
     pub fn deinit(self: *@This()) void {
-        log.debug("release={d}", .{self.page.id});
         self.hold.release();
         self.page.unpin();
-        log.debug("unpin={d} pins={d}", .{ self.page.id, self.page.pins });
         self.* = undefined;
     }
 };
