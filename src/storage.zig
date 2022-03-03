@@ -1,5 +1,5 @@
 pub const BufferManager = @import("storage/buffer.zig").Manager;
-pub const Page = @import("storage/page.zig").Page;
+pub const page = @import("storage/page.zig");
 pub const tuple = @import("storage/tuple.zig");
 pub const File = @import("storage/file.zig").File;
 pub const Entry = @import("storage/entry.zig").Entry;

@@ -60,30 +60,42 @@ test "pinned pages are not evicted when space is needed" {
     var ctx = try Test.setup(1);
     defer ctx.teardown();
 
-    var page = try ctx.bm.pin(0);
-    try t.expectError(BufferManager.Error.Full, ctx.bm.pin(1));
-    page.unpin();
+    try t.expectError(BufferManager.Error.Full, ctx.bm.pin(1, .free));
+}
+
+test "pages cannot be pinned for a mismatched type" {
+    var ctx = try Test.setup(1);
+    defer ctx.teardown();
+
+    // Page 0 is the first page of the directory
+    try t.expectError(BufferManager.Error.PageTypeMismatch, ctx.bm.pin(0, .tuple));
 }
 
 test "unpinned pages are evicted when space is needed" {
     var ctx = try Test.setup(2);
     defer ctx.teardown();
 
-    var page = try ctx.bm.pin(0);
-    page.unpin();
-    page = try ctx.bm.pin(1);
-    page.unpin();
+    var p = try ctx.bm.pin(1, .directory);
+    p.unpin();
+
+    p = try ctx.bm.pin(2, .directory);
+    p.unpin();
 }
 
 test "pin and unpin many pages" {
     var ctx = try Test.setup(10);
     defer ctx.teardown();
 
-    var i: u32 = 0;
+    var i: u32 = 1;
     while (i < 256) : (i += 1) {
-        var page = try ctx.bm.pin(i);
+        var page = try ctx.bm.pin(i, .free);
         page.unpin();
     }
+}
+
+test "page types are validated when pinning" {
+    var ctx = try Test.setup(10);
+    defer ctx.teardown();
 }
 
 // *** Tuple pages ***
@@ -92,7 +104,8 @@ test "tuple pages can be written to" {
     defer ctx.teardown();
 
     const expected: []const u8 = &[_]u8{ 0x41, 0x42, 0x43 };
-    var page = try ctx.bm.pin(0);
+    var page = try ctx.bm.pin(1, .tuple);
+    _ = tuple.TuplePage.new(page);
 
     var xPage = try tuple.Writable.init(page);
     const loc = try xPage.put(expected);
@@ -108,15 +121,15 @@ test "tuple pages can be written to" {
 test "page directories can allocate and free pages" {
     var ctx = try Test.setup(5);
     defer ctx.teardown();
-    var p1 = try ctx.bm.allocLatched(.exclusive);
-    const pageID = p1.page.id;
+    var p1 = try ctx.bm.allocLatched(.directory, .exclusive);
+    const pageID = p1.page.id();
     p1.deinit();
     try ctx.bm.free(pageID);
 
     // We should get the same page back
-    var p2 = try ctx.bm.allocLatched(.exclusive);
-    try t.expectEqual(pageID, p2.page.id);
-    const p2ID = p2.page.id;
+    var p2 = try ctx.bm.allocLatched(.tuple, .exclusive);
+    try t.expectEqual(pageID, p2.page.id());
+    const p2ID = p2.page.id();
     p2.deinit();
     try ctx.bm.free(p2ID);
 }

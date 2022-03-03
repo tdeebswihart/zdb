@@ -1,21 +1,20 @@
 const std = @import("std");
 const FileManager = @import("file.zig").Manager;
-const Page = @import("page.zig").Page;
+const page = @import("page.zig");
 const LatchedPage = @import("page.zig").LatchedPage;
 const PinnedPage = @import("page.zig").Pin;
 const SharedPage = @import("page.zig").SharedPage;
 const ExclusivePage = @import("page.zig").ExclusivePage;
-const Latch = @import("libdb").sync.Latch;
+const lib = @import("libdb");
+const Latch = lib.sync.Latch;
 const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
 const assert = std.debug.assert;
 
 const log = std.log.scoped(.bm);
 
-const PageMetadata = struct {
-    // page offset = sizeof header + sizeof directory + offset into directory *
-    // pagesize?
-    bytesFree: u16,
-};
+fn Result(comptime T: type) type {
+    return lib.Result(T, anyerror);
+}
 
 // Storage managers manage access to individual files.
 // Each file is carved up into pages which we treat as a generic heap.
@@ -26,10 +25,9 @@ const PageMetadata = struct {
 pub const Manager = struct {
     file: FileManager,
     mem: std.mem.Allocator,
-    headPage: *Page,
+    headPage: *page.ControlBlock,
     directoryHead: *DirectoryPage,
-    pages: []Page,
-    buffer: []u8,
+    pages: []page.ControlBlock,
     op: u64 = 0,
     latch: Latch = .{},
 
@@ -38,24 +36,36 @@ pub const Manager = struct {
     pub const Error = error{
         Full,
         WrongDirectory,
+        PageNotFound,
         Invalid,
         TooSmall,
+        PageTypeMismatch,
     };
 
     pub fn init(file: FileManager, size: usize, mem: std.mem.Allocator) !*Self {
-        var pages = try mem.alloc(Page, size);
+        var pages = try mem.alloc(page.ControlBlock, size);
 
         var i: usize = 0;
         while (i < size) : (i += 1) {
-            try pages[i].init(mem);
+            try pages[i].init();
         }
         const mgr = try mem.create(Self);
         mgr.file = file;
         mgr.mem = mem;
         mgr.pages = pages;
         mgr.latch = .{};
-        mgr.headPage = try mgr.pin(0);
-        mgr.directoryHead = DirectoryPage.from(mgr.headPage);
+        mgr.headPage = try mgr.pin(0, .directory);
+        var hdr = mgr.headPage.header();
+        if (hdr.magic != page.MAGIC) {
+            hdr.magic = page.MAGIC;
+            hdr.pageID = 0;
+            hdr.pageType = .directory;
+            hdr.lsn = 0;
+            hdr.crc32 = 0;
+            mgr.directoryHead = DirectoryPage.new(mgr.headPage);
+        } else {
+            mgr.directoryHead = DirectoryPage.from(mgr.headPage);
+        }
 
         return mgr;
     }
@@ -65,30 +75,36 @@ pub const Manager = struct {
         _ = self.latch.exclusive();
         self.headPage.unpin();
         while (i < self.pages.len) : (i += 1) {
-            var page = &self.pages[i];
-            try self.writeback(page);
-            try page.deinit();
+            var p = &self.pages[i];
+            try self.writebackLatched(p);
+            try p.deinit();
         }
         self.mem.free(self.pages);
         self.mem.destroy(self);
     }
 
-    fn writeback(self: *Self, page: *Page) !void {
-        // allow reads while we write a page back
-        var hold = page.latch.shared();
-        defer hold.release();
-        if (page.live and page.dirty) {
-            _ = try self.file.writeAll(page.id, page.buffer[0..]);
-            page.dirty = false;
+    fn writebackLatched(self: *Self, p: *page.ControlBlock) !void {
+        if (p.live and p.dirty) {
+            const hdr = p.header();
+            _ = try self.file.writeAll(hdr.pageID, p.buffer[0..]);
+            p.dirty = false;
         }
     }
-    pub fn pin(self: *Self, pageID: u32) anyerror!*Page {
+
+    fn writeback(self: *Self, p: *page.ControlBlock) !void {
+        log.debug("writeback page={d}({any})", .{ p.id(), p });
+        // allow reads while we write a page back
+        var hold = p.latch.shared();
+        defer hold.release();
+        try self.writebackLatched(p);
+    }
+    pub fn pin(self: *Self, pageID: u32, pageTy: page.Type) anyerror!*page.ControlBlock {
         var hold = self.latch.exclusive();
         defer hold.release();
-        return self.pinImpl(pageID);
+        return self.pinImpl(pageID, pageTy);
     }
 
-    fn pinImpl(self: *Self, pageID: u32) anyerror!*Page {
+    fn pinImpl(self: *Self, pageID: u32, pageTy: ?page.Type) anyerror!*page.ControlBlock {
         var leastRecentlyUsed: usize = 0;
         var lowestTs: usize = std.math.maxInt(usize);
         var i: u16 = 0;
@@ -99,18 +115,25 @@ pub const Manager = struct {
         // and use that to serialize the loading and unloading of
         // pages that have spilled to disk
         while (i < self.pages.len) : (i += 1) {
-            const page = &self.pages[i];
-            if (!page.live) {
+            const p = &self.pages[i];
+            if (!p.live) {
                 lowestTs = 0;
                 leastRecentlyUsed = i;
                 break;
             }
-            if (page.id == pageID) {
-                page.pin();
-                return page;
+            const hdr = p.header();
+            if (hdr.pageID == pageID) {
+                if (pageTy) |pty| {
+                    if (hdr.pageType != .free and hdr.pageType != pty) {
+                        log.err("mismatched page={d} expected type={any} found={any}", .{ pageID, pty, hdr.pageType });
+                        return Error.PageTypeMismatch;
+                    }
+                }
+                p.pin();
+                return p;
             }
-            if (!page.pinned() and page.lastAccess < lowestTs) {
-                lowestTs = page.lastAccess;
+            if (!p.pinned() and p.lastAccess < lowestTs) {
+                lowestTs = p.lastAccess;
                 leastRecentlyUsed = i;
             }
         }
@@ -119,67 +142,101 @@ pub const Manager = struct {
             return Error.Full;
         }
         var lru = &self.pages[leastRecentlyUsed];
-        try self.writeback(lru);
+        if (lru.live) {
+            try self.writeback(lru);
+        }
         _ = try self.file.readAll(pageID, lru.buffer[0..lru.buffer.len]);
-        lru.id = pageID;
-        lru.dirty = false;
-        lru.live = true;
-        lru.pins = 0;
+        var hdr = lru.header();
+        if (hdr.magic == page.MAGIC) {
+            if (hdr.pageID != pageID) {
+                log.err("loaded page={d} as page={d}", .{ hdr.pageID, pageID });
+                return Error.Invalid;
+            }
+            // only check allocated pages as this is also used internally by alloc
+            if (pageTy) |pty| {
+                if (pty != hdr.pageType) {
+                    return Error.PageTypeMismatch;
+                }
+            }
+            // FIXME check crc32 if valid?
+        }
+        self.op += 1;
+        lru.reinit(self.op);
         lru.pin();
         return lru;
     }
 
-    pub fn pinLatched(self: *Self, pageID: u32, kind: Latch.Kind) anyerror!LatchedPage {
-        const page = try self.pin(pageID);
+    pub fn pinLatched(self: *Self, pageID: u32, pageTy: page.Type, kind: Latch.Kind) anyerror!LatchedPage {
+        const p = try self.pin(pageID, pageTy);
         var hold = switch (kind) {
-            .shared => page.latch.shared(),
-            .exclusive => page.latch.exclusive(),
+            .shared => p.latch.shared(),
+            .exclusive => p.latch.exclusive(),
         };
+        log.debug("acquired shares={d} page={d}", .{ hold.shares, pageID });
         return LatchedPage{
-            .page = page,
+            .page = p,
             .hold = hold,
         };
     }
 
     /// Allocate and pin a page
-    pub fn allocate(self: *Self) anyerror!*Page {
+    pub fn allocate(self: *Self, pageTy: page.Type) anyerror!*page.ControlBlock {
         var hold = self.latch.exclusive();
         defer hold.release();
-        var page = self.headPage;
+        var p = self.headPage;
         var dir = self.directoryHead;
-        var pageHold = page.latch.shared();
+        var pageHold = p.latch.shared();
         while (dir.full()) {
+            var isNew = false;
+            const next = dir.header.pageID + nPages;
+            if (dir.next == 0) {
+                // new page
+                dir.next = next;
+                p.dirty = true;
+                isNew = true;
+            }
             pageHold.release();
             if (dir != self.directoryHead) {
-                page.unpin();
+                p.unpin();
             }
-            // go to the next directory
-            page = try self.pinImpl(dir.next);
-            pageHold = page.latch.exclusive();
-            dir = DirectoryPage.from(page);
+            p = try self.pinImpl(next, .directory);
+            pageHold = p.latch.exclusive();
+            if (isNew) {
+                dir = DirectoryPage.new(p);
+            } else {
+                dir = DirectoryPage.from(p);
+            }
         }
 
         const pageID = dir.allocate() orelse {
             assert(false);
             unreachable;
         };
-        page.dirty = true;
+        log.debug("allocated page={d} type={any}", .{ pageID, pageTy });
+        p.dirty = true;
 
         pageHold.release();
         if (dir != self.directoryHead) {
-            page.unpin();
+            p.unpin();
         }
-        return try self.pinImpl(pageID);
+        var np = try self.pinImpl(pageID, pageTy);
+        var hdr = np.header();
+        hdr.magic = page.MAGIC;
+        hdr.pageID = pageID;
+        hdr.pageType = pageTy;
+        hdr.lsn = 0;
+        hdr.crc32 = 0;
+        return np;
     }
 
-    pub fn allocLatched(self: *Self, kind: Latch.Kind) anyerror!LatchedPage {
-        const page = try self.allocate();
+    pub fn allocLatched(self: *Self, pageTy: page.Type, kind: Latch.Kind) anyerror!LatchedPage {
+        const p = try self.allocate(pageTy);
         var hold = switch (kind) {
-            .shared => page.latch.shared(),
-            .exclusive => page.latch.exclusive(),
+            .shared => p.latch.shared(),
+            .exclusive => p.latch.exclusive(),
         };
         return LatchedPage{
-            .page = page,
+            .page = p,
             .hold = hold,
         };
     }
@@ -190,13 +247,17 @@ pub const Manager = struct {
         var dirPage = self.headPage;
         var dir = self.directoryHead;
         var pageHold = dirPage.latch.shared();
-        while (pageID > dir.id + nPages) {
+        while (pageID > dir.header.pageID + nPages) {
+            const next = dir.next;
             pageHold.release();
             if (dir != self.directoryHead) {
                 dirPage.unpin();
             }
-            // go to the next dirPageectory
-            dirPage = try self.pinImpl(dir.next);
+            if (next == 0) {
+                return Error.PageNotFound;
+            }
+            // go to the next directory
+            dirPage = try self.pinImpl(dir.next, .directory);
             pageHold = dirPage.latch.shared();
             dir = DirectoryPage.from(dirPage);
         }
@@ -204,13 +265,15 @@ pub const Manager = struct {
         pageHold.release();
         pageHold = dirPage.latch.exclusive();
 
+        log.debug("freeing page={d} dir={d}", .{ pageID, dirPage.id() });
         dir.free(pageID);
-        // Scribble out the page's contents
-        var page = try self.pinImpl(pageID);
-        defer page.unpin();
-        var ph = page.latch.exclusive();
+        var p = try self.pinImpl(pageID, null);
+        defer p.unpin();
+        var ph = p.latch.exclusive();
         defer ph.release();
-        for (page.buffer) |*b| b.* = 0x41;
+        var hdr = p.header();
+        // Scribble out the page's contents?
+        hdr.pageType = .free;
         dirPage.dirty = true;
 
         pageHold.release();
@@ -222,33 +285,27 @@ pub const Manager = struct {
 
 // page_size - directory overhead
 const nPages = (PAGE_SIZE - @sizeOf(u32) * 3);
-const dirMagic = 0xC45C4DE;
 /// A single page of the directory.
 /// The page directory is composed of a linked list of DirectoryPage structures
 pub const DirectoryPage = struct {
     // The number of pages a directoryPage can manage
-    id: u32,
+    header: page.Header,
     next: u32,
-    magic: u32,
     freePages: [nPages]u1,
 
     const Self = @This();
 
-    pub fn from(page: *Page) *Self {
-        var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer[0..]));
-        if (self.magic != dirMagic) {
-            // This is a new page
-            self.id = page.id;
-            self.magic = dirMagic;
-            self.next = page.id + nPages;
-            // Fuck it. I'll use u64s and bit math some other time
-            for (self.freePages) |_, idx| {
-                self.freePages[idx] = 1;
-            }
-            page.dirty = true;
-        } else if (self.id != page.id) {
-            @panic("corrupt directory page");
+    pub fn from(p: *page.ControlBlock) *Self {
+        return @ptrCast(*Self, @alignCast(@alignOf(Self), p.buffer[0..]));
+    }
+
+    pub fn new(p: *page.ControlBlock) *Self {
+        var self = Self.from(p);
+        // Fuck it. I'll use u64s and bit math some other time
+        for (self.freePages) |_, idx| {
+            self.freePages[idx] = 1;
         }
+        p.dirty = true;
         return self;
     }
 
@@ -264,8 +321,9 @@ pub const DirectoryPage = struct {
     pub fn allocate(self: *Self) ?u32 {
         for (self.freePages) |available, idx| {
             if (available == 1) {
-                const pageID: u32 = self.id + @intCast(u32, idx) + 1;
+                const pageID: u32 = self.header.pageID + @intCast(u32, idx) + 1;
                 self.freePages[idx] = 0;
+                log.debug("allocate dir={d} page={d}", .{ self.header.pageID, pageID });
                 return pageID;
             }
         }
@@ -273,7 +331,7 @@ pub const DirectoryPage = struct {
     }
 
     pub fn free(self: *Self, pageID: u64) void {
-        const offset = pageID - self.id - 1;
+        const offset = pageID - self.header.pageID - 1;
         self.freePages[offset] = 1;
     }
 };

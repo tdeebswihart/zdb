@@ -1,13 +1,11 @@
 const std = @import("std");
 const FileManager = @import("file.zig").Manager;
 const PAGE_SIZE = @import("config.zig").PAGE_SIZE;
-const Page = @import("page.zig").Page;
+const page = @import("page.zig");
 const Latch = @import("libdb").sync.Latch;
 const Crc32 = std.hash.Crc32;
 const Entry = @import("entry.zig").Entry;
 const assert = std.debug.assert;
-
-const MAGIC: u32 = 0xD3ADB33F;
 
 pub const Slot = struct {
     // The offset of this Record within its block
@@ -28,54 +26,39 @@ pub const GetError = Error || error{
     RecordDeleted,
 };
 
-const Header = struct {
-    magic: u32 = 0,
-    remainingSpace: u16 = 0,
-    freeSpace: u16 = 0,
-    slotsInUse: u32 = 0,
-};
-
 // Each block is of fixed length and acts as a bump-up
 // allocator for contained records.
 // A periodic compaction (or vacuum) process should clean up
 // deleted blocks so there are no gaps in the file.
 pub const TuplePage = struct {
-    const slotSpace = PAGE_SIZE - (@sizeOf(u32) + @sizeOf(Header));
-
-    crc32: u32 = 0,
-    header: Header,
+    const slotSpace = PAGE_SIZE - (2 * @sizeOf(u32) + @sizeOf(page.Header));
+    header: page.Header,
+    remainingSpace: u16 = 0,
+    freeSpace: u16 = 0,
+    slotsInUse: u32 = 0,
     slots: [slotSpace]u8,
 
     const Self = @This();
 
-    pub fn init(page: *Page) Error!*Self {
-        var self = @ptrCast(*Self, @alignCast(@alignOf(Self), page.buffer[0..]));
-        if (self.header.magic != MAGIC) {
-            self.header.magic = MAGIC;
-            self.header.remainingSpace = slotSpace;
-            self.header.freeSpace = slotSpace;
-            self.header.slotsInUse = 0;
-            self.crc32 = self.hash();
-            page.dirty = true;
-        } else {
-            const expected = self.hash();
-            if (self.crc32 != expected) {
-                return Error.ChecksumMismatch;
-            }
-        }
+    pub fn init(p: *page.ControlBlock) *Self {
+        return @ptrCast(*Self, @alignCast(@alignOf(Self), p.buffer[0..]));
+    }
+
+    pub fn new(p: *page.ControlBlock) *Self {
+        var self = Self.init(p);
+        self.remainingSpace = slotSpace;
+        self.freeSpace = slotSpace;
+        self.slotsInUse = 0;
+        p.dirty = true;
         return self;
     }
 
-    pub fn hash(self: *Self) u32 {
-        return Crc32.hash(std.mem.asBytes(self)[@offsetOf(Self, "crc32") + @sizeOf(u32) ..]);
-    }
-
     pub fn can_contain(self: *Self, amount: u16) bool {
-        return self.header.remainingSpace > (amount + @sizeOf(Slot));
+        return self.remainingSpace > (amount + @sizeOf(Slot));
     }
 
     fn findSlot(self: *Self, index: u16) GetError!*align(1) Slot {
-        if (index >= self.header.slotsInUse) {
+        if (index >= self.slotsInUse) {
             return GetError.RecordDoesntExist;
         }
         const start = index * @sizeOf(Slot);
@@ -86,14 +69,14 @@ pub const TuplePage = struct {
 };
 
 pub const Readable = struct {
-    page: *Page,
+    page: *page.ControlBlock,
     hold: Latch.Hold,
     inner: ?*TuplePage,
 
-    pub fn init(page: *Page) !@This() {
-        var hold = page.latch.shared();
+    pub fn init(p: *page.ControlBlock) !@This() {
+        var hold = p.latch.shared();
         errdefer hold.release();
-        return Readable{ .inner = try TuplePage.init(page), .page = page, .hold = hold };
+        return Readable{ .inner = TuplePage.init(p), .page = p, .hold = hold };
     }
 
     pub fn deinit(self: *@This()) void {
@@ -115,20 +98,15 @@ pub const Readable = struct {
 pub const Writable = struct {
     inner: ?*TuplePage,
     hold: Latch.Hold,
-    page: *Page,
+    page: *page.ControlBlock,
 
-    pub fn init(page: *Page) !@This() {
-        var hold = page.latch.exclusive();
+    pub fn init(p: *page.ControlBlock) !@This() {
+        var hold = p.latch.exclusive();
         errdefer hold.release();
-        return Writable{ .inner = try TuplePage.init(page), .page = page, .hold = hold };
+        return Writable{ .inner = TuplePage.init(p), .page = p, .hold = hold };
     }
 
     pub fn deinit(self: *@This()) void {
-        var inner = self.inner orelse {
-            assert(false);
-            return;
-        };
-        inner.crc32 = inner.hash();
         self.inner = null;
         self.hold.release();
     }
@@ -145,29 +123,29 @@ pub const Writable = struct {
     pub fn put(self: @This(), record: []const u8) Error!Entry {
         const inner = self.inner orelse return Error.InvalidPage;
         const bytesNecessary = @intCast(u16, record.len) + @sizeOf(Slot);
-        if (inner.header.remainingSpace < bytesNecessary) {
+        if (inner.remainingSpace < bytesNecessary) {
             return Error.OutOfSpace;
         }
 
-        const offset = inner.header.freeSpace;
+        const offset = inner.freeSpace;
         std.mem.copy(u8, inner.slots[offset - record.len .. offset], record);
-        inner.header.freeSpace -= @intCast(u16, record.len);
-        inner.header.remainingSpace -= bytesNecessary;
+        inner.freeSpace -= @intCast(u16, record.len);
+        inner.remainingSpace -= bytesNecessary;
 
-        const recordNum = inner.header.slotsInUse;
+        const recordNum = inner.slotsInUse;
         const slot = Slot{
-            .offset = inner.header.freeSpace,
+            .offset = inner.freeSpace,
             .size = @intCast(u16, record.len),
         };
-        var slotStart = inner.header.slotsInUse * @sizeOf(Slot);
+        var slotStart = inner.slotsInUse * @sizeOf(Slot);
         var slotMem = inner.slots[slotStart .. slotStart + @sizeOf(Slot)];
         std.mem.copy(u8, slotMem, std.mem.asBytes(&slot));
-        inner.header.slotsInUse += 1;
+        inner.slotsInUse += 1;
 
         self.page.dirty = true;
 
         return Entry{
-            .page = self.page.id,
+            .page = self.page.id(),
             .slot = @intCast(u16, recordNum),
         };
     }

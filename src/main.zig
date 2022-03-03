@@ -6,7 +6,7 @@ const logr = std.log.scoped(.zdb);
 
 fn openFile(fpath: []const u8) !std.fs.File {
     const cwd = std.fs.cwd();
-    return cwd.openFile(fpath, .{ .read = true, .write = true }) catch |err| switch (err) {
+    return cwd.openFile(fpath, .{ .mode = .read_write }) catch |err| switch (err) {
         error.FileNotFound => try cwd.createFile(fpath, .{ .read = true, .mode = 0o755 }),
         else => err,
     };
@@ -19,29 +19,41 @@ pub fn main() !void {
         const leaked = gpa.deinit();
         if (leaked) logr.err("leaked memory", .{});
     }
-    const dbfile = try openFile("init.zdb");
-    var fs = try storage.File.init(allocator, dbfile);
+    const dbfile = openFile("init.zdb") catch |err| {
+        logr.err("failed to open database: {any}\n", .{err});
+        return;
+    };
+    var fs = storage.File.init(allocator, dbfile) catch |err| {
+        logr.err("failed to wrap db file: {any}", .{err});
+        return;
+    };
     var mgr = fs.manager();
     defer mgr.deinit();
-    const bm = try storage.BufferManager.init(fs.manager(), 50, allocator);
+    const bm = storage.BufferManager.init(fs.manager(), 50, allocator) catch |err| {
+        logr.err("failed create bm: {any}\n", .{err});
+        return;
+    };
     defer {
         bm.deinit() catch |err| {
             logr.err("failed to deinit manager: {any}\n", .{err});
         };
     }
 
-    var p1 = try bm.allocLatched(.exclusive);
-    const pageID = p1.page.id;
-    p1.deinit();
+    var p1 = try bm.allocate(.tuple);
+    _ = tuple.TuplePage.new(p1);
+    var xPage = try tuple.Writable.init(p1);
+    _ = try xPage.put(&[_]u8{ 0x41, 0x42, 0x43 });
+    const pageID = p1.id();
+    xPage.deinit();
+    p1 = undefined;
     try bm.free(pageID);
 
     // We should get the same page back
-    var p2 = try bm.allocLatched(.exclusive);
-    if (pageID != p2.page.id) {
-        logr.err("expected={d} got={d}", .{ pageID, p2.page.id });
-        return;
+    var p2 = try bm.allocLatched(.tuple, .exclusive);
+    if (p2.page.id() != pageID) {
+        logr.err("expected={d} found={d}", .{ pageID, p2.page.id() });
     }
-    const p2ID = p2.page.id;
+    const p2ID = p2.page.id();
     p2.deinit();
     try bm.free(p2ID);
 
