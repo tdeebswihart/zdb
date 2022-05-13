@@ -11,7 +11,7 @@ const BufferManager = @import("buffer.zig").Manager;
 
 const log = std.log.scoped(.hashtable);
 
-pub const DirectoryPage = struct {
+pub const DirectoryPage = packed struct {
     header: page.Header,
     globalDepth: u32,
     localDepths: [512]u8,
@@ -38,19 +38,19 @@ pub const DirectoryPage = struct {
 /// The amount of data a BucketPage can store is based on the key, value,
 /// and page sizes.
 pub fn BucketPage(comptime K: type, comptime V: type) type {
-    const Entry = struct {
+    const Entry = packed struct {
         key: K,
         val: V,
     };
-    return struct {
-        pub const maxEntries = 4 * PAGE_SIZE / (4 * @sizeOf(Entry) + 1);
+    return packed struct {
+        pub const maxEntries = 4 * PAGE_SIZE / (4 * @sizeOf(Entry) + 1) / 8;
         header: page.Header,
 
-        occupied: [maxEntries]u1,
+        occupied: [maxEntries]u8,
         // 0 if tombstoned or unoccupied
         // 1 otherwise
-        readable: [maxEntries]u1,
-        data: [maxEntries]Entry,
+        readable: [maxEntries]u8,
+        data: [maxEntries * 8]Entry,
         const Self = @This();
 
         pub fn new(p: *page.ControlBlock) *Self {
@@ -64,8 +64,16 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
             return @ptrCast(*Self, @alignCast(@alignOf(Self), p.buffer[0..]));
         }
 
+        pub fn unoccupied(self: *Self, i: u16) bool {
+            return self.occupied[i / 8] & (@as(u8, 1) << @truncate(u3, i)) == 0;
+        }
+
+        pub fn unreadable(self: *Self, i: u16) bool {
+            return self.readable[i / 8] & (@as(u8, 1) << @truncate(u3, i)) == 0;
+        }
+
         pub fn get(self: *Self, i: u16, key: K) ?V {
-            if (self.readable[i] == 0) {
+            if (self.unreadable(i)) {
                 return null;
             }
             const e = &self.data[i];
@@ -77,6 +85,7 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
 
         pub fn insert(self: *Self, initIdx: u16, key: K, val: V) bool {
             if (self.put(initIdx, key, val)) {
+                log.debug("inserted into bucketPage={d} i={d} byte={d} bit={d}", .{ self.header.pageID, initIdx, initIdx / 8, @truncate(u3, initIdx) });
                 return true;
             }
             // Wrap around until we find a space
@@ -86,31 +95,34 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
                     i = 0;
                 }
                 if (self.put(i, key, val)) {
+                    log.debug("inserted into bucketPage={d} i={d} byte={d} bit={d}", .{ self.header.pageID, i, i / 8, @truncate(u3, i) });
                     return true;
                 }
             }
             return false;
         }
 
-        pub fn put(self: *Self, i: u16, key: K, val: V) bool {
-            if (self.readable[i] == 1) {
-                return false;
+        fn put(self: *Self, i: u16, key: K, val: V) bool {
+            const byte: u16 = i / 8;
+            const bit: u3 = @truncate(u3, i);
+            if (self.unoccupied(i)) {
+                self.occupied[byte] |= @as(u8, 1) << bit;
+                self.readable[byte] |= @as(u8, 1) << bit;
+                self.data[i] = .{ .key = key, .val = val };
+                return true;
             }
-            self.occupied[i] = 1;
-            self.readable[i] = 1;
-            self.data[i] = .{ .key = key, .val = val };
-            return true;
+            return false;
         }
 
         pub fn remove(self: *Self, i: u16, key: K, val: V) void {
             var e = &self.data[i];
-            if (meta.eql(key, e.key) and meta.eql(val, e.val)) {
-                self.readable[i] = 0;
+            const bit: u3 = @truncate(u3, i);
+            if (self.unreadable(i)) {
+                return false;
             }
-        }
-
-        pub fn forceRemove(self: *Self, i: u16) void {
-            self.readable[i] = 0;
+            if (meta.eql(key, e.key) and meta.eql(val, e.val)) {
+                self.readable[i / 8] &= ~(@as(u8, 1) << bit);
+            }
         }
     };
 }
@@ -235,11 +247,12 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             }
 
             var i = localIdx + 1;
-            while (i != localIdx and b.occupied[i] == 1) : (i += 1) {
+            while (i != localIdx and !b.unoccupied(i)) : (i += 1) {
                 if (i > Bucket.maxEntries) {
                     i = 0;
                 }
                 if (b.get(@intCast(u16, i), key)) |val| {
+                    log.debug("get from bucketPage={d} i={d} byte={d} bit={d}", .{ self.directory.bucketPageIDs[pfx], i, i / 8, @truncate(u3, i) });
                     try results.append(val);
                 }
             }
@@ -259,6 +272,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             var b = Bucket.init(bh.page);
             var localIdx: u16 = self.localIndex(hsh);
             if (b.insert(localIdx, key, val)) {
+                log.debug("put {any} into bucketPage={d} idx={d}", .{ key, d.bucketPageIDs[idx], localIdx });
                 return true;
             }
 
@@ -270,6 +284,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             var replacement = try self.bm.allocLatched(.hashBucket, .exclusive);
             defer replacement.deinit();
             var rb = Bucket.new(replacement.page);
+            log.debug("splitting {d} into {d} and {d}", .{ d.bucketPageIDs[idx], mirror.page.id(), replacement.page.id() });
 
             d.localDepths[idx] += 1;
             const newIdx = idx << 1;
@@ -309,7 +324,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
 
             var i: u16 = 0;
             while (i < Bucket.maxEntries) : (i += 1) {
-                if (b.readable[i] == 1) {
+                if (!b.unreadable(i)) {
                     const e = b.data[i];
                     const ehsh = self.checksum(e.key);
                     if (self.prefix(ehsh) == mirrorIdx) {
@@ -337,18 +352,20 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             var hold = self.latch.shared();
             defer hold.release();
 
+            log.debug("latching shared bucketPage={d}", .{self.directory.bucketPageIDs[pfx]});
             var base = try self.bm.pinLatched(self.directory.bucketPageIDs[pfx], .hashBucket, .exclusive);
             defer base.deinit();
 
             var b = Bucket.init(base.page);
             var localIdx: u16 = self.localIndex(hsh);
-            if (b.occupied[localIdx] == 0) {
+            if (b.unoccupied(localIdx)) {
                 return;
             }
             b.remove(localIdx, key, val);
 
             var i = localIdx + 1;
-            while (i != localIdx and b.occupied[i] == 1) : (i += 1) {
+            // FIXME
+            while (i != localIdx and !b.unoccupied(i)) : (i += 1) {
                 if (i > Bucket.maxEntries) {
                     i = 0;
                 }

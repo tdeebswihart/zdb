@@ -10,23 +10,24 @@ pub const LatchedPage = struct {
     hold: Latch.Hold,
 
     pub fn deinit(self: *@This()) void {
-        log.debug("released shares={d} page={d}", .{ self.hold.shares, self.page.id() });
+        log.debug("releasing page={d} shares={d}", .{ self.page.id(), self.hold.shares });
         self.hold.release();
         self.page.unpin();
         self.* = undefined;
     }
 };
 
-pub const Type = enum(u8) { free, directory, hashDirectory, hashBucket, tuple };
+pub const Type = enum(u32) { free, directory, hashDirectory, hashBucket, tuple };
 
 pub const MAGIC: u32 = 0xD3ADB33F;
-pub const Header = struct {
+pub const Header = packed struct {
     // Should be the checksum of everything in the page after it
     magic: u32 = 0,
     crc32: u32 = 0,
     pageID: u32 = 0,
     lsn: u32 = 0,
     pageType: Type = .free,
+    _reserved: u32 = 0,
 };
 
 pub const ControlBlock = struct {

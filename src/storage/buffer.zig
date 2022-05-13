@@ -172,7 +172,7 @@ pub const Manager = struct {
             .shared => p.latch.shared(),
             .exclusive => p.latch.exclusive(),
         };
-        log.debug("acquired shares={d} page={d}", .{ hold.shares, pageID });
+        log.debug("acquired page={d} shares={d}", .{ pageID, hold.shares });
         return LatchedPage{
             .page = p,
             .hold = hold,
@@ -284,14 +284,14 @@ pub const Manager = struct {
 };
 
 // page_size - directory overhead
-const nPages = (PAGE_SIZE - @sizeOf(u32) * 3);
+const nPages = (PAGE_SIZE - @sizeOf(page.Header) - @sizeOf(u32)) / 8;
 /// A single page of the directory.
 /// The page directory is composed of a linked list of DirectoryPage structures
-pub const DirectoryPage = struct {
+pub const DirectoryPage = packed struct {
     // The number of pages a directoryPage can manage
     header: page.Header,
     next: u32,
-    freePages: [nPages]u1,
+    freePages: [nPages]u8,
 
     const Self = @This();
 
@@ -303,7 +303,7 @@ pub const DirectoryPage = struct {
         var self = Self.from(p);
         // Fuck it. I'll use u64s and bit math some other time
         for (self.freePages) |_, idx| {
-            self.freePages[idx] = 1;
+            self.freePages[idx] = std.math.maxInt(u8);
         }
         p.dirty = true;
         return self;
@@ -311,7 +311,7 @@ pub const DirectoryPage = struct {
 
     pub fn full(self: *Self) bool {
         for (self.freePages) |v| {
-            if (v == 1) {
+            if (v == std.math.maxInt(u8)) {
                 return false;
             }
         }
@@ -320,8 +320,19 @@ pub const DirectoryPage = struct {
 
     pub fn allocate(self: *Self) ?u32 {
         for (self.freePages) |available, idx| {
-            if (available == 1) {
-                const pageID: u32 = self.header.pageID + @intCast(u32, idx) + 1;
+            if (available > 0) {
+                var i: u3 = 0;
+                var offset: u8 = 0;
+                // Find the first unset bit
+                while (i < 8) {
+                    if (available & (@as(u8, 1) << i) == 1) {
+                        offset = i;
+                        break;
+                    }
+                    i += 1;
+                }
+                const pageID: u32 = self.header.pageID + @intCast(u32, idx) * 8 + offset + 1;
+                // clear that bit
                 self.freePages[idx] = 0;
                 log.debug("allocate dir={d} page={d}", .{ self.header.pageID, pageID });
                 return pageID;

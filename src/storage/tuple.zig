@@ -30,7 +30,7 @@ pub const GetError = Error || error{
 // allocator for contained records.
 // A periodic compaction (or vacuum) process should clean up
 // deleted blocks so there are no gaps in the file.
-pub const TuplePage = struct {
+pub const TuplePage = packed struct {
     const slotSpace = PAGE_SIZE - (2 * @sizeOf(u32) + @sizeOf(page.Header));
     header: page.Header,
     remainingSpace: u16 = 0,
