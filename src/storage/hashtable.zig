@@ -117,10 +117,7 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
         pub fn remove(self: *Self, i: u16, key: K, val: V) void {
             var e = &self.data[i];
             const bit: u3 = @truncate(u3, i);
-            if (self.unreadable(i)) {
-                return false;
-            }
-            if (meta.eql(key, e.key) and meta.eql(val, e.val)) {
+            if (!self.unreadable(i) and meta.eql(key, e.key) and meta.eql(val, e.val)) {
                 self.readable[i / 8] &= ~(@as(u8, 1) << bit);
             }
         }
@@ -263,26 +260,24 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             var idx = self.prefix(hsh);
 
             var hold = self.latch.exclusive();
-            defer hold.release();
 
             const d = self.directory;
             var bh = try self.bm.pinLatched(d.bucketPageIDs[idx], .hashBucket, .exclusive);
-            defer bh.deinit();
 
             var b = Bucket.init(bh.page);
             var localIdx: u16 = self.localIndex(hsh);
             if (b.insert(localIdx, key, val)) {
                 log.debug("put {any} into bucketPage={d} idx={d}", .{ key, d.bucketPageIDs[idx], localIdx });
+                bh.deinit();
+                hold.release();
                 return true;
             }
 
             var mirror = try self.bm.allocLatched(.hashBucket, .exclusive);
-            defer mirror.deinit();
             var mb = Bucket.new(mirror.page);
 
             // Replace self.
             var replacement = try self.bm.allocLatched(.hashBucket, .exclusive);
-            defer replacement.deinit();
             var rb = Bucket.new(replacement.page);
             log.debug("splitting {d} into {d} and {d}", .{ d.bucketPageIDs[idx], mirror.page.id(), replacement.page.id() });
 
@@ -297,6 +292,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
                 var last = (@as(u32, 2) << @intCast(u5, d.globalDepth)) - 1;
                 // The bucket at idx 0 never changes
                 while (last > 0) : (last -= 1) {
+                    log.debug("moving bucket page {d} to idx {d}", .{ d.bucketPageIDs[last], last << 1 });
                     d.bucketPageIDs[last << 1] = d.bucketPageIDs[last];
                     d.localDepths[last << 1] = d.localDepths[last];
                     d.bucketPageIDs[last << 1 + 1] = d.bucketPageIDs[last];
@@ -305,8 +301,6 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
                 d.bucketPageIDs[mirrorIdx] = mirror.page.id();
                 d.bucketPageIDs[newIdx] = replacement.page.id();
                 d.globalDepth += 1;
-                // Recalculate insertion idx
-                idx = self.prefix(hsh);
             } else {
                 // Each of page, mirror should occupy 2**(global depth - old local dopth - 1) spaces
                 const toOccupy = @as(u32, 2) << @intCast(u5, d.globalDepth - d.localDepths[idx] - 2);
@@ -321,6 +315,10 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
                     d.bucketPageIDs[mirrorIdx + taken] = mirror.page.id();
                 }
             }
+            // Recalculate insertion idx
+            idx = self.prefix(hsh);
+            log.debug("placed mirror page {d} at {d}", .{ mirror.page.id(), mirrorIdx });
+            log.debug("placed replacement page {d} at {d}", .{ replacement.page.id(), newIdx });
 
             var i: u16 = 0;
             while (i < Bucket.maxEntries) : (i += 1) {
@@ -336,13 +334,14 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             }
 
             // We're splitting so are replacing this page
-            try self.bm.free(bh.page.id());
+            const origPage = bh.page.id();
+            bh.deinit();
+            try self.bm.free(origPage);
 
-            if (idx == mirrorIdx) {
-                return mb.insert(self.localIndex(hsh), key, val);
-            } else {
-                return try self.put(key, val);
-            }
+            replacement.deinit();
+            mirror.deinit();
+            hold.release();
+            return try self.put(key, val);
         }
 
         /// FIXME: merge pages if their load is below a certain amount
