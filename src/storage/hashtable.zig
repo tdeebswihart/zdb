@@ -21,6 +21,7 @@ pub const DirectoryPage = packed struct {
     const Self = @This();
 
     pub fn init(p: *page.ControlBlock) *Self {
+        comptime assert(@sizeOf(Self) <= PAGE_SIZE);
         return @ptrCast(*Self, @alignCast(@alignOf(Self), p.buffer[0..]));
     }
 
@@ -43,17 +44,17 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
         val: V,
     };
     return packed struct {
-        pub const maxEntries = 4 * PAGE_SIZE / (4 * @sizeOf(Entry) + 1) / 8;
+        pub const maxEntries = 4 * (PAGE_SIZE - @sizeOf(page.Header)) / (4 * @sizeOf(Entry) + 1);
         header: page.Header,
-
-        occupied: [maxEntries]u8,
+        occupied: [maxEntries / 8]u8,
         // 0 if tombstoned or unoccupied
         // 1 otherwise
-        readable: [maxEntries]u8,
-        data: [maxEntries * 8]Entry,
+        readable: [maxEntries / 8]u8,
+        data: [maxEntries]Entry,
         const Self = @This();
 
         pub fn new(p: *page.ControlBlock) *Self {
+            comptime assert(@sizeOf(Self) <= PAGE_SIZE);
             var self = @ptrCast(*Self, @alignCast(@alignOf(Self), p.buffer[0..]));
             for (self.occupied) |*b| b.* = 0;
             for (self.readable) |*b| b.* = 0;
@@ -61,6 +62,7 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
         }
 
         pub fn init(p: *page.ControlBlock) *Self {
+            comptime assert(@sizeOf(Self) <= PAGE_SIZE);
             return @ptrCast(*Self, @alignCast(@alignOf(Self), p.buffer[0..]));
         }
 

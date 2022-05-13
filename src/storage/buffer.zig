@@ -303,6 +303,7 @@ pub const DirectoryPage = packed struct {
     const Self = @This();
 
     pub fn from(p: *page.ControlBlock) *Self {
+        comptime assert(@sizeOf(Self) <= PAGE_SIZE);
         return @ptrCast(*Self, @alignCast(@alignOf(Self), p.buffer[0..]));
     }
 
@@ -329,16 +330,18 @@ pub const DirectoryPage = packed struct {
         for (self.freePages) |available, idx| {
             if (available > 0) {
                 var i: u8 = 0;
-                var offset: u32 = 0;
+                var offset: u32 = std.math.maxInt(u32);
                 // Find the first set bit
                 while (i < 8) {
-                    if (available & set_bit(i) > 1) {
+                    if (available & set_bit(i) > 0) {
                         offset = i;
                         break;
                     }
                     i += 1;
                 }
+                assert(offset < 8);
                 const pageID: u32 = self.header.pageID + @intCast(u32, idx) * 8 + offset + 1;
+                log.debug("allocated page={d} byte={d} bit={d}", .{ pageID, idx, offset });
                 // clear that bit
                 self.freePages[idx] &= ~set_bit(i);
                 return pageID;
@@ -351,5 +354,6 @@ pub const DirectoryPage = packed struct {
         const offset = pageID - self.header.pageID - 1;
         self.freePages[offset / 8] |= set_bit(@truncate(u3, offset));
         self.freePages[offset / 8] |= set_bit(@truncate(u3, offset));
+        log.debug("freed page={d} byte={d} bit={d}", .{ pageID, offset / 8, @truncate(u3, offset) });
     }
 };
