@@ -96,7 +96,7 @@ pub fn log(
     // Ignore all non-error logging from sources other than
     // .my_project, .nice_library and .default
     const scope_prefix = switch (scope) {
-        .hashtable => @tagName(scope),
+        .hashtable, .bm => @tagName(scope),
         else => if (@enumToInt(level) <= @enumToInt(std.log.Level.err))
             @tagName(scope)
         else

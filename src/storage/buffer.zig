@@ -172,7 +172,6 @@ pub const Manager = struct {
             .shared => p.latch.shared(),
             .exclusive => p.latch.exclusive(),
         };
-        log.debug("acquired page={d} shares={d}", .{ pageID, hold.shares });
         return LatchedPage{
             .page = p,
             .hold = hold,
@@ -285,6 +284,9 @@ pub const Manager = struct {
 
 // page_size - directory overhead
 const nPages = (PAGE_SIZE - @sizeOf(page.Header) - @sizeOf(u32)) / 8;
+fn set_bit(bit: u8) u8 {
+    return @as(u8, 1) << (7 - @truncate(u3, bit));
+}
 /// A single page of the directory.
 /// The page directory is composed of a linked list of DirectoryPage structures
 pub const DirectoryPage = packed struct {
@@ -311,7 +313,7 @@ pub const DirectoryPage = packed struct {
 
     pub fn full(self: *Self) bool {
         for (self.freePages) |v| {
-            if (v == std.math.maxInt(u8)) {
+            if (v > 0) {
                 return false;
             }
         }
@@ -321,11 +323,11 @@ pub const DirectoryPage = packed struct {
     pub fn allocate(self: *Self) ?u32 {
         for (self.freePages) |available, idx| {
             if (available > 0) {
-                var i: u3 = 0;
-                var offset: u8 = 0;
-                // Find the first unset bit
+                var i: u8 = 0;
+                var offset: u32 = 0;
+                // Find the first set bit
                 while (i < 8) {
-                    if (available & (@as(u8, 1) << i) == 1) {
+                    if (available & set_bit(i) > 1) {
                         offset = i;
                         break;
                     }
@@ -333,8 +335,7 @@ pub const DirectoryPage = packed struct {
                 }
                 const pageID: u32 = self.header.pageID + @intCast(u32, idx) * 8 + offset + 1;
                 // clear that bit
-                self.freePages[idx] = 0;
-                log.debug("allocate dir={d} page={d}", .{ self.header.pageID, pageID });
+                self.freePages[idx] &= ~set_bit(i);
                 return pageID;
             }
         }
@@ -343,6 +344,7 @@ pub const DirectoryPage = packed struct {
 
     pub fn free(self: *Self, pageID: u64) void {
         const offset = pageID - self.header.pageID - 1;
-        self.freePages[offset] = 1;
+        self.freePages[offset / 8] |= set_bit(@truncate(u3, offset));
+        self.freePages[offset / 8] |= set_bit(@truncate(u3, offset));
     }
 };
