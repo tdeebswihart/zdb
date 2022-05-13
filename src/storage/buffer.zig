@@ -40,6 +40,7 @@ pub const Manager = struct {
         Invalid,
         TooSmall,
         PageTypeMismatch,
+        CannotFree,
     };
 
     pub fn init(file: FileManager, size: usize, mem: std.mem.Allocator) !*Self {
@@ -270,6 +271,10 @@ pub const Manager = struct {
         defer p.unpin();
         var ph = p.latch.exclusive();
         defer ph.release();
+        if (p.pins > 1) {
+            log.err("cannot free page={d} with pins={d}", .{ pageID, p.pins });
+            return Error.CannotFree;
+        }
         var hdr = p.header();
         // Scribble out the page's contents?
         hdr.pageType = .free;

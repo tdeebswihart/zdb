@@ -75,7 +75,6 @@ pub const Readable = struct {
 
     pub fn init(p: *page.ControlBlock) !@This() {
         var hold = p.latch.shared();
-        errdefer hold.release();
         return Readable{ .inner = TuplePage.init(p), .page = p, .hold = hold };
     }
 

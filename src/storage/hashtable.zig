@@ -85,18 +85,17 @@ pub fn BucketPage(comptime K: type, comptime V: type) type {
 
         pub fn insert(self: *Self, initIdx: u16, key: K, val: V) bool {
             if (self.put(initIdx, key, val)) {
-                log.debug("inserted into bucketPage={d} i={d} byte={d} bit={d}", .{ self.header.pageID, initIdx, initIdx / 8, @truncate(u3, initIdx) });
                 return true;
             }
             // Wrap around until we find a space
             var i = initIdx + 1;
-            while (i != initIdx) : (i += 1) {
+            while (i != initIdx) {
+                if (self.put(i, key, val)) {
+                    return true;
+                }
+                i += 1;
                 if (i > Self.maxEntries) {
                     i = 0;
-                }
-                if (self.put(i, key, val)) {
-                    log.debug("inserted into bucketPage={d} i={d} byte={d} bit={d}", .{ self.header.pageID, i, i / 8, @truncate(u3, i) });
-                    return true;
                 }
             }
             return false;
@@ -150,12 +149,10 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             var b1 = try bm.allocLatched(.hashBucket, .exclusive);
             defer b1.deinit();
             _ = Bucket.new(b1.page);
-            log.debug("bucket={d}", .{b1.page.id()});
 
             var b2 = try bm.allocLatched(.hashBucket, .exclusive);
             defer b2.deinit();
             _ = Bucket.new(b2.page);
-            log.debug("bucket={d}", .{b2.page.id()});
 
             dir.globalDepth = 1;
             // set up our first two buckets
@@ -188,7 +185,7 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             var h = self.latch.exclusive();
             errdefer h.release();
             if (self.directory.globalDepth > 0) {
-                const pages = @as(u32, 2) << @intCast(u5, self.directory.globalDepth - 1);
+                const pages = @as(u32, 2) << @truncate(u5, self.directory.globalDepth - 1);
                 var idx: u16 = 0;
                 while (idx < pages) : (idx += 1) {
                     if (self.directory.bucketPageIDs[idx] == 0) {
@@ -249,7 +246,6 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
                     i = 0;
                 }
                 if (b.get(@intCast(u16, i), key)) |val| {
-                    log.debug("get from bucketPage={d} i={d} byte={d} bit={d}", .{ self.directory.bucketPageIDs[pfx], i, i / 8, @truncate(u3, i) });
                     try results.append(val);
                 }
             }
@@ -262,12 +258,12 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             var hold = self.latch.exclusive();
 
             const d = self.directory;
+            log.debug("getting idx={d} page={d}", .{ idx, d.bucketPageIDs[idx] });
             var bh = try self.bm.pinLatched(d.bucketPageIDs[idx], .hashBucket, .exclusive);
 
             var b = Bucket.init(bh.page);
             var localIdx: u16 = self.localIndex(hsh);
             if (b.insert(localIdx, key, val)) {
-                log.debug("put {any} into bucketPage={d} idx={d}", .{ key, d.bucketPageIDs[idx], localIdx });
                 bh.deinit();
                 hold.release();
                 return true;
@@ -279,46 +275,50 @@ pub fn HashTable(comptime K: type, comptime V: type) type {
             // Replace self.
             var replacement = try self.bm.allocLatched(.hashBucket, .exclusive);
             var rb = Bucket.new(replacement.page);
-            log.debug("splitting {d} into {d} and {d}", .{ d.bucketPageIDs[idx], mirror.page.id(), replacement.page.id() });
+            log.debug("splitting {d} idx {d} into {d} and {d}", .{ d.bucketPageIDs[idx], idx, mirror.page.id(), replacement.page.id() });
 
             d.localDepths[idx] += 1;
-            const newIdx = idx << 1;
-            const mirrorIdx = idx + 1;
-            if (d.localDepths[idx] > d.globalDepth) {
+            var newIdx = idx;
+            if (d.localDepths[idx] >= d.globalDepth) {
+                newIdx <<= 1;
                 // Double in size
                 // Starting from the last active page, each gets
                 // (idx << 1) and (idx << 1 + 1)
                 // We then overwrite mirrorIdx with mirror's pageId
-                var last = (@as(u32, 2) << @intCast(u5, d.globalDepth)) - 1;
-                // The bucket at idx 0 never changes
+                var last = (@as(u32, 2) << @truncate(u5, d.globalDepth - 1)) - 1;
+                log.debug("doubling size from global depth {d}; last at {d}", .{ d.globalDepth, last });
                 while (last > 0) : (last -= 1) {
-                    log.debug("moving bucket page {d} to idx {d}", .{ d.bucketPageIDs[last], last << 1 });
+                    log.debug("moving bucket page {d} from {d} to idx {d}", .{ d.bucketPageIDs[last], last, last << 1 });
                     d.bucketPageIDs[last << 1] = d.bucketPageIDs[last];
                     d.localDepths[last << 1] = d.localDepths[last];
-                    d.bucketPageIDs[last << 1 + 1] = d.bucketPageIDs[last];
-                    d.localDepths[last << 1 + 1] = d.localDepths[last];
+                    log.debug("moving bucket page {d} from {d} to idx {d}", .{ d.bucketPageIDs[last], last, (last << 1) + 1 });
+                    d.bucketPageIDs[(last << 1) + 1] = d.bucketPageIDs[last];
+                    d.localDepths[(last << 1) + 1] = d.localDepths[last];
                 }
-                d.bucketPageIDs[mirrorIdx] = mirror.page.id();
-                d.bucketPageIDs[newIdx] = replacement.page.id();
+                // handle bucket zero now
+                log.debug("moving bucket page {d} from 0 to idx 1", .{d.bucketPageIDs[last]});
+                d.bucketPageIDs[1] = d.bucketPageIDs[last];
+                d.localDepths[1] = d.localDepths[last];
+
                 d.globalDepth += 1;
-            } else {
-                // Each of page, mirror should occupy 2**(global depth - old local dopth - 1) spaces
-                const toOccupy = @as(u32, 2) << @intCast(u5, d.globalDepth - d.localDepths[idx] - 2);
-                var taken: u32 = 0;
-                while (taken < toOccupy) : (taken += 1) {
-                    d.localDepths[newIdx + taken] = d.localDepths[idx];
-                    d.bucketPageIDs[newIdx + taken] = replacement.page.id();
-                }
-                taken = 0;
-                while (taken < toOccupy) : (taken += 1) {
-                    d.localDepths[mirrorIdx + taken] = d.localDepths[idx];
-                    d.bucketPageIDs[mirrorIdx + taken] = mirror.page.id();
-                }
+            }
+            // Each of page, mirror should occupy 2**(global depth - old local depth - 1) spaces
+            const toOccupy = @as(u32, 2) << @truncate(u5, d.globalDepth - d.localDepths[idx]);
+            const mirrorIdx = newIdx + toOccupy;
+            var taken: u32 = 0;
+            while (taken < toOccupy) : (taken += 1) {
+                d.localDepths[newIdx + taken] = d.localDepths[idx];
+                log.debug("placing replacement page {d} depth {d} at idx {d}", .{ replacement.page.id(), d.localDepths[idx], newIdx + taken });
+                d.bucketPageIDs[newIdx + taken] = replacement.page.id();
+            }
+            taken = 0;
+            while (taken < toOccupy) : (taken += 1) {
+                d.localDepths[mirrorIdx + taken] = d.localDepths[idx];
+                log.debug("placing mirror page {d} depth {d} at idx {d}", .{ mirror.page.id(), d.localDepths[idx], mirrorIdx + taken });
+                d.bucketPageIDs[mirrorIdx + taken] = mirror.page.id();
             }
             // Recalculate insertion idx
             idx = self.prefix(hsh);
-            log.debug("placed mirror page {d} at {d}", .{ mirror.page.id(), mirrorIdx });
-            log.debug("placed replacement page {d} at {d}", .{ replacement.page.id(), newIdx });
 
             var i: u16 = 0;
             while (i < Bucket.maxEntries) : (i += 1) {

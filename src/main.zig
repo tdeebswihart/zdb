@@ -39,24 +39,6 @@ pub fn main() !void {
         };
     }
 
-    var p1 = try bm.allocate(.tuple);
-    _ = tuple.TuplePage.new(p1);
-    var xPage = try tuple.Writable.init(p1);
-    _ = try xPage.put(&[_]u8{ 0x41, 0x42, 0x43 });
-    const pageID = p1.id();
-    xPage.deinit();
-    p1 = undefined;
-    try bm.free(pageID);
-
-    // We should get the same page back
-    var p2 = try bm.allocLatched(.tuple, .exclusive);
-    if (p2.page.id() != pageID) {
-        logr.err("expected={d} found={d}", .{ pageID, p2.page.id() });
-    }
-    const p2ID = p2.page.id();
-    p2.deinit();
-    try bm.free(p2ID);
-
     var ht = try storage.HashTable(u16, u16).new(allocator, bm);
     defer {
         ht.destroy() catch |err| {
